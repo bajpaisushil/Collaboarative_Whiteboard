@@ -1,7 +1,7 @@
 "use client";
 /**
- * Network lab: make the link between tabs slow, lossy, duplicated or clock-skewed, flip the
- * experimental WebRTC upgrade, and watch traffic counters and per-peer link transports.
+ * Network lab: make the link between tabs slow, lossy, duplicated or clock-skewed, and watch
+ * traffic counters and per-peer link transports.
  */
 import clsx from "clsx";
 import { ChevronDown, RefreshCw, RotateCcw } from "lucide-react";
@@ -9,10 +9,9 @@ import { DEFAULT_CONDITIONS, type NetworkConditions } from "@/lib/sync/protocol"
 import { useSession, useSessionState } from "@/lib/session/react";
 import { Popover } from "@/components/ui/Popover";
 import { Slider } from "@/components/ui/Slider";
-import { Switch } from "@/components/ui/Switch";
 import { STATUS_WORD, ThreadBadge } from "@/components/ui/ThreadBadge";
 import { formatSkew } from "../format";
-import { isChaotic, selectChaotic, selectNetwork, selectNamedPeers, selectRtcEnabled, selectTraffic } from "../selectors";
+import { isChaotic, selectChaotic, selectNetwork, selectNamedPeers, selectTraffic } from "../selectors";
 
 export function NetworkPopover() {
   const chaotic = useSessionState(selectChaotic);
@@ -45,7 +44,6 @@ export function NetworkPopover() {
 function NetworkLab() {
   const session = useSession();
   const network = useSessionState(selectNetwork);
-  const rtc = useSessionState(selectRtcEnabled);
   const set = (patch: Partial<NetworkConditions>) => session.setConditions(patch);
   const reset = () =>
     session.setConditions({
@@ -138,20 +136,6 @@ function NetworkLab() {
             Sync now
           </button>
         </div>
-      </div>
-
-      <div className="border-t border-dashed border-line px-4 py-3.5">
-        <Switch
-          checked={rtc}
-          onChange={(v) => session.setRtcEnabled(v)}
-          label="Direct WebRTC link"
-          badge={
-            <span className="rounded-full border border-line-2 px-1.5 py-px font-mono text-[9.5px] uppercase tracking-wider text-muted">
-              experimental
-            </span>
-          }
-          description="When both tabs turn this on, their traffic moves to a WebRTC data channel. BroadcastChannel is still used to find each other."
-        />
       </div>
 
       <Traffic />

@@ -67,7 +67,7 @@ export default function SplitApp() {
   }
 
   return (
-    <main aria-label="Weave split view" className="grid h-dvh grid-cols-[minmax(0,1fr)_380px_minmax(0,1fr)] gap-2.5 bg-paper-2 p-2.5 text-ink">
+    <main aria-label="Weave split view" className="grid h-dvh grid-cols-[minmax(0,1fr)_380px_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] gap-2.5 bg-paper-2 p-2.5 text-ink">
       <h1 className="sr-only">Weave split view — Tab A and Tab B side by side, with the director’s desk between them</h1>
       {paneA}
       <Seam stage={stage} runner={runner} tour={tour} room={params.room} />

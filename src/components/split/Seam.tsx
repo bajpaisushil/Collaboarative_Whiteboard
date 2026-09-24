@@ -10,8 +10,8 @@
  */
 import { useMemo, useRef } from "react";
 import { SessionProvider } from "@/lib/session/react";
-import { PaneProvider, type PaneContextValue } from "@/lib/ui/pane";
-import { UiStoreProvider } from "@/lib/ui/store";
+import { isTypingTarget, PaneProvider, usePaneKeydown, type PaneContextValue } from "@/lib/ui/pane";
+import { UiStoreProvider, useUiStore } from "@/lib/ui/store";
 import { ToastProvider, ToastViewport } from "@/components/ui/Toast";
 import { useExternal } from "./hooks";
 import type { ScenarioRunner } from "./runner";
@@ -67,6 +67,7 @@ function SeamDesk({ stage, runner, tour, room, onClose }: SeamProps & { stage: S
               data-pane="seam"
               className="sheet relative isolate flex h-full min-h-0 flex-col overflow-hidden outline-none"
             >
+              <SeamHotkeys />
               <SeamThreads />
               <SeamHeader stage={stage} onClose={onClose} />
               <div className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4">
@@ -83,4 +84,21 @@ function SeamDesk({ stage, runner, tour, room, onClose }: SeamProps & { stage: S
       </UiStoreProvider>
     </SessionProvider>
   );
+}
+
+/** Escape inside the desk closes the focused knot (everywhere) before anything else. */
+function SeamHotkeys() {
+  const ui = useUiStore();
+  usePaneKeydown((e) => {
+    if (e.key !== "Escape" || isTypingTarget(e.target)) return false;
+    const s = ui.getState();
+    if (s.ghost && !s.focus) {
+      s.set({ ghost: null });
+      return true;
+    }
+    if (!s.focus) return false;
+    s.focusConflict(null);
+    return true;
+  });
+  return null;
 }

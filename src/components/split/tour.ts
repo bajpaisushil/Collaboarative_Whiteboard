@@ -93,6 +93,7 @@ export class TourController {
   private known = new Set<ShapeId>();
   private baseFill: string | null = null;
   private pendingStart = false;
+  private autoStarted = false;
   private timers = new Set<ReturnType<typeof setTimeout>>();
 
   subscribe = (listener: () => void): (() => void) => {
@@ -120,7 +121,11 @@ export class TourController {
   /** Watch both panes. Returns a detach function. */
   attach(stage: Stage, opts: { autoStart?: boolean } = {}): () => void {
     this.stage = stage;
-    if (opts.autoStart) this.pendingStart = true;
+    // One-shot: re-attaching (StrictMode, Fast Refresh) must not restart an exited tour.
+    if (opts.autoStart && !this.autoStarted) {
+      this.autoStarted = true;
+      this.pendingStart = true;
+    }
     const check = () => this.evaluate();
     const unsubs = [
       stage.panes.A.session.replica.subscribe(check),

@@ -111,6 +111,17 @@ export class CanvasController {
     ro.observe(svg);
     this.detachFns.push(() => ro.disconnect());
 
+    // Escape aborts an in-progress gesture before any pane-level Escape handling (which
+    // would otherwise clear the focused knot and leave the drag running).
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || !this.gesture) return;
+      this.cancel();
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    this.d.container.addEventListener("keydown", onKeyDown);
+    this.detachFns.push(() => this.d.container.removeEventListener("keydown", onKeyDown));
+
     const onBlur = () => this.setSpace(false);
     window.addEventListener("blur", onBlur);
     this.detachFns.push(() => window.removeEventListener("blur", onBlur));

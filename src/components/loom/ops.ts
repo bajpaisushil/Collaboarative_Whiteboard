@@ -38,7 +38,9 @@ export interface OpSummary {
 
 export function opSummary(replica: ReplicaReadApi, op: Op): OpSummary {
   const type = shapeTypeOf(replica, op);
-  const text = describeOp(op, type);
+  const raw = describeOp(op, type);
+  // "created a ellipse" → "created an ellipse" (create summaries only: never touch quoted text)
+  const text = op.kind === "shape.create" ? raw.replace(/^created a (?=[aeiou])/, "created an ") : raw;
   const noun = op.kind === "shape.create" || op.kind === "snapshot.mark" || !type ? null : shapeNoun(type);
   return { noun, text };
 }

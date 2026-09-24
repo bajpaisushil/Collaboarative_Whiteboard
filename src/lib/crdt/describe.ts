@@ -98,8 +98,10 @@ function quote(text: string, max = 24): string {
 export function describeOp(op: Op, shapeType?: ShapeType): string {
   const noun = shapeType ? shapeNoun(shapeType) : "shape";
   switch (op.kind) {
-    case "shape.create":
-      return `created a ${shapeNoun(op.shapeType)}`;
+    case "shape.create": {
+      const n = shapeNoun(op.shapeType);
+      return `created ${/^[aeiou]/.test(n) ? "an" : "a"} ${n}`;
+    }
     case "shape.update":
       return Object.keys(op.props).length === 0 ? `restored the ${noun}` : `${describeProps(op.props, shapeType)}`;
     case "shape.delete":

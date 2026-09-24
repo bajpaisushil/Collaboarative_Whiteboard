@@ -83,7 +83,10 @@ interface MergeWindow {
   apartMs: number;
   vcBefore: VectorClock;
   received: OpId[];
-  sentCount: number;
+  /** Distinct local ops pushed during the window (fallback when no peer reported its clock). */
+  sent: Set<OpId>;
+  /** How many of our ops each peer had when it first reported its clock in this window. */
+  peerHad: Map<ReplicaId, number>;
   before: Map<ShapeId, ShapeView | null>;
   conflictsBefore: Set<string>;
   resurrected: Set<ShapeId>;
@@ -380,12 +383,19 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       peers: this.peerInfos(),
       offlineSince: this.offlineSince,
       unsyncedLocalOps: known.length ? Math.max(0, mine - minSeen) : this.offlineSince ? this.localOpsSince(this.offlineSince) : 0,
-      stableVc: this.replica.stableFrontier(known),
+      stableVc: this.stableVcCached(known),
       lastMerge: this.mergeHistory[this.mergeHistory.length - 1] ?? null,
       mergeHistory: this.mergeHistory,
       traffic: { ...traffic },
       storage: { bytes: this.persistence.bytes, error: this.persistence.error },
     };
+  }
+
+  private stableVcMemo: VectorClock = {};
+  private stableVcCached(known: VectorClock[]): VectorClock {
+    const next = this.replica.stableFrontier(known);
+    if (!vcEquals(next, this.stableVcMemo)) this.stableVcMemo = next;
+    return this.stableVcMemo;
   }
 
   private localOpsSince(t: number): number {
@@ -521,7 +531,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     for (let i = 0; i < ops.length; i += CHUNK_OPS) {
       this.send({ ...this.envelope(), to: peer, t: "ops", ops: ops.slice(i, i + CHUNK_OPS), reason: "catchup" });
     }
-    if (this.window) this.window.sentCount += ops.filter((o) => o.replica === this.replica.id).length;
+    if (this.window) for (const o of ops) if (o.replica === this.replica.id) this.window.sent.add(o.id);
   }
 
   private upsertPeer(
@@ -562,7 +572,10 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     if ((wasAway || reconnecting) && this.conditions.online && !vcLeq(msg.vc, ourVc) && !this.window) {
       this.openWindow(prevVc !== msg.vc ? "peer-returned" : "joined", [msg.from], 0);
     }
-    if (this.window) this.window.peers.add(msg.from);
+    if (this.window) {
+      this.window.peers.add(msg.from);
+      if (!this.window.peerHad.has(msg.from)) this.window.peerHad.set(msg.from, vcGet(msg.vc, this.replica.id));
+    }
     // Label collision among live peers: the greater replica id re-picks (display only).
     if (!this.labelForced && this.ready && msg.label !== "?" && msg.label === this.replica.label && this.replica.id > msg.from) this.pickLabel();
     return p;
@@ -674,7 +687,8 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       apartMs,
       vcBefore: this.replica.getView().vc,
       received: [],
-      sentCount: 0,
+      sent: new Set(),
+      peerHad: new Map(),
       before: new Map(),
       conflictsBefore: new Set(this.replica.getView().conflicts.map((c) => c.id)),
       resurrected: new Set(),
@@ -689,18 +703,18 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     if (view.pending.length) return;
     const live = [...this.peers.values()].filter((p) => !p.left && p.status !== "unreachable");
     if (live.length === 0) return;
-    if (live.every((p) => vcEquals(p.vc, view.vc)) && w.received.length + w.sentCount > 0) this.closeWindow();
+    if (live.every((p) => vcEquals(p.vc, view.vc)) && w.received.length + w.sent.size > 0) this.closeWindow();
   }
 
   private closeWindow(discard = false): void {
     const w = this.window;
     this.window = null;
     if (!w || discard) return;
-    if (w.received.length === 0 && w.sentCount === 0) return;
+    if (w.received.length === 0 && w.sent.size === 0) return;
     const view = this.replica.getView();
     const newConflicts = view.conflicts.filter((c) => !w.conflictsBefore.has(c.id)).map((c) => c.id);
     // A first join that only caught us up isn't a "merge moment".
-    if (w.direction === "joined" && w.sentCount === 0 && newConflicts.length === 0) return;
+    if (w.direction === "joined" && w.sent.size === 0 && newConflicts.length === 0) return;
     const changed = [...w.before].map(([shapeId, before]) => {
       const after = this.replica.getShape(shapeId);
       return { shapeId, before, after };
@@ -713,7 +727,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       vcBefore: w.vcBefore,
       vcAfter: view.vc,
       receivedOpIds: w.received,
-      sentCount: w.sentCount,
+      sentCount: this.sentInWindow(w, view.vc),
       changed,
       newConflicts,
       resurrected: [...w.resurrected].filter((s) => !!this.replica.getShape(s)),
@@ -722,6 +736,15 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     this.mergeHistory = [...this.mergeHistory.slice(-19), report];
     this.emit({ type: "merge", report });
     this.touch();
+  }
+
+  /** Our edits the peers hadn't seen when the window opened (per their own first report). */
+  private sentInWindow(w: MergeWindow, vcAfter: VectorClock): number {
+    if (w.peerHad.size === 0) return w.sent.size;
+    const mine = vcGet(vcAfter, this.replica.id);
+    let n = 0;
+    for (const had of w.peerHad.values()) n = Math.max(n, mine - had);
+    return Math.max(0, n);
   }
 
   /* ================================================================ timers */

@@ -32,7 +32,7 @@ export function PaneFrame({
   const color = threadColor(pane);
   const edge = `color-mix(in oklab, ${color} 42%, var(--line))`;
   return (
-    <section aria-label={`Tab ${pane}, user ${USER_NO[pane]}`} className={clsx("flex min-h-0 min-w-0 flex-col", className)}>
+    <section aria-label={`Tab ${pane}, user ${USER_NO[pane]}`} className={clsx("flex min-h-0 min-w-0 flex-1 flex-col", className)}>
       <div className="flex h-8 shrink-0 items-end gap-2 pl-3 pr-1.5">
         <div
           className="relative z-10 -mb-px flex h-8 items-center gap-1.5 rounded-t-[10px] border border-b-0 bg-paper pl-2 pr-3 text-[12.5px]"

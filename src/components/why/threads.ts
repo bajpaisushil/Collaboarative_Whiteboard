@@ -38,22 +38,16 @@ export function useThreadOf(): ThreadOf {
   const self = useSessionState(selectSelf);
   const selfLabel = useSessionState(selectSelfLabel);
   return useMemo(() => {
-    const labels = new Map<string, string>();
+    // Build every known thread up front (stable identities); unknown ids get a "?" thread.
+    const threads = new Map<ReplicaId, Thread>();
     for (const part of sig.split(";")) {
       if (!part) continue;
       const eq = part.indexOf("=");
-      labels.set(part.slice(0, eq), part.slice(eq + 1));
+      const replica = part.slice(0, eq);
+      threads.set(replica, threadForLabel(part.slice(eq + 1), replica, false));
     }
-    const cache = new Map<ReplicaId, Thread>();
-    return (replica: ReplicaId) => {
-      const hit = cache.get(replica);
-      if (hit) return hit;
-      const isSelf = replica === self;
-      const label = isSelf ? selfLabel : (labels.get(replica) ?? "?");
-      const t = threadForLabel(label, replica, isSelf);
-      cache.set(replica, t);
-      return t;
-    };
+    threads.set(self, threadForLabel(selfLabel, self, true));
+    return (replica: ReplicaId) => threads.get(replica) ?? threadForLabel("?", replica, false);
   }, [sig, self, selfLabel]);
 }
 

@@ -96,6 +96,8 @@ export class Replica implements ReplicaApi {
   private logCopy: { version: number; ops: readonly Op[] } = { version: -1, ops: [] };
   private directory: { version: number; label: string; map: ReadonlyMap<ReplicaId, ReplicaInfo> } = { version: -1, label: "", map: new Map() };
   private checkpoints: { count: number; doc: DocState }[] = [];
+  private pendingCache: readonly Op[] = [];
+  private snapshotsCache: { map: DocState["snapshots"] | null; list: ReplicaView["snapshots"] } = { map: null, list: [] };
   private cutCache = new Map<string, { version: number; shapes: ShapeView[] }>();
   private explainCache = new Map<string, { key: string; value: Explanation | null }>();
 
@@ -144,7 +146,8 @@ export class Replica implements ReplicaApi {
     const shapes = aliveViews(this.doc);
     const shapeById = new Map(shapes.map((s) => [s.id, s] as const));
     if (this.logCopy.version !== this.log.version) this.logCopy = { version: this.log.version, ops: this.log.all().slice() };
-    const pending = [...this.pending.values()].sort(compareOps);
+    const pending = this.stablePending();
+    const snapshots = this.stableSnapshots();
     this.view = {
       version: this.version,
       replica: this._id,
@@ -157,7 +160,7 @@ export class Replica implements ReplicaApi {
       log: this.logCopy.ops,
       pending,
       conflicts: this.conflictsFlat,
-      snapshots: Object.values(this.doc.snapshots).sort((a, b) => a.lamport - b.lamport || (a.opId < b.opId ? -1 : 1)),
+      snapshots,
       canUndo: this.undoMgr.canUndo,
       canRedo: this.undoMgr.canRedo,
       undoLabel: this.undoMgr.undoLabel,
@@ -165,6 +168,23 @@ export class Replica implements ReplicaApi {
       stateHash: hashDoc(this.doc),
     };
     return this.view;
+  }
+
+  /** Keep array identity while contents are unchanged (cheap selector equality for the UI). */
+  private stablePending(): readonly Op[] {
+    const next = [...this.pending.values()].sort(compareOps);
+    const prev = this.pendingCache;
+    if (prev.length === next.length && prev.every((o, i) => o === next[i])) return prev;
+    this.pendingCache = next;
+    return next;
+  }
+
+  private stableSnapshots(): ReplicaView["snapshots"] {
+    const map = this.doc.snapshots;
+    if (map === this.snapshotsCache.map) return this.snapshotsCache.list;
+    const list = Object.values(map).sort((a, b) => a.lamport - b.lamport || (a.opId < b.opId ? -1 : 1));
+    this.snapshotsCache = { map, list };
+    return list;
   }
 
   private replicaDirectory(): ReadonlyMap<ReplicaId, ReplicaInfo> {

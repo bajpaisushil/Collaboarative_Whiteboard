@@ -14,7 +14,7 @@ import { IconButton } from "@/components/ui/IconButton";
 import { Kbd } from "@/components/ui/Kbd";
 import { ThreadBadge } from "@/components/ui/ThreadBadge";
 import { useLoomThreads, useSnapshots } from "./hooks";
-import { describeScrub, stepScrub } from "./scrub";
+import { describeScrub, stepScrub, type Scrub } from "./scrub";
 
 const selectLog = (v: ReplicaView) => v.log;
 
@@ -41,16 +41,16 @@ export function TimeTravelBanner() {
           exit={reduce ? { opacity: 0 } : { opacity: 0, y: -8, scale: 0.98, transition: { duration: 0.14 } }}
           transition={reduce ? { duration: 0.1 } : { type: "spring", stiffness: 520, damping: 40 }}
         >
-          <BannerBody />
+          {/* The scrub is passed down so the card keeps its text while it animates out. */}
+          <BannerBody scrub={scrub} />
         </motion.div>
       )}
     </AnimatePresence>
   );
 }
 
-function BannerBody() {
+function BannerBody({ scrub }: { scrub: Scrub }) {
   const store = useUiStore();
-  const scrub = useUi((s) => s.scrub);
   const log = useReplicaView(selectLog);
   const snapshots = useSnapshots();
   const threads = useLoomThreads();
