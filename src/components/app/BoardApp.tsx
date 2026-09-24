@@ -1,18 +1,17 @@
 "use client";
 /**
  * The "/" board: reads the room from the URL, acquires this tab's session, waits until the
- * identity lease is settled (`state.ready`), then mounts the full board surface.
+ * identity lease and label are settled (`state.ready` — the label is "?" before that), then
+ * mounts the full board surface.
  */
 import { useEffect, useMemo, useState } from "react";
-import type { WhiteboardSessionApi } from "@/lib/session/types";
-import { SessionProvider, useAcquiredSession, useSessionState } from "@/lib/session/react";
+import type { SessionOptions } from "@/lib/session/types";
+import { useAcquiredSession } from "@/lib/session/react";
 import { BoardSurface } from "./BoardSurface";
 import { parseBoardParams, stripFreshParam, type BoardParams } from "./params";
-import { selectReady } from "./selectors";
+import { ReadyGate } from "./ReadyGate";
 import { Splash } from "./Splash";
 import { applyStoredTheme } from "./theme";
-
-const SLOW_START_MS = 4000;
 
 export default function BoardApp() {
   // Client-only component (loaded with ssr:false), so reading the URL on first render is safe.
@@ -22,45 +21,22 @@ export default function BoardApp() {
     applyStoredTheme();
   }, []);
 
+  // `fresh` is captured in state above; drop it from the address bar so a reload keeps
+  // this tab's (new) identity instead of wiping it again.
   useEffect(() => {
     if (params.fresh) stripFreshParam();
   }, [params.fresh]);
 
-  const options = useMemo(
-    () => ({ room: params.room, pane: params.pane, label: params.label, fresh: params.fresh }),
+  const options = useMemo<SessionOptions>(
+    () => ({ room: params.room, pane: "main", label: params.label, fresh: params.fresh }),
     [params],
   );
   const session = useAcquiredSession(options);
 
   if (!session) return <Splash />;
   return (
-    <SessionProvider session={session}>
-      <ReadyGate session={session} compact={params.compact} />
-    </SessionProvider>
+    <ReadyGate session={session}>
+      <BoardSurface session={session} />
+    </ReadyGate>
   );
-}
-
-function ReadyGate({ session, compact }: { session: WhiteboardSessionApi; compact: boolean }) {
-  const ready = useSessionState(selectReady);
-  const [slow, setSlow] = useState(false);
-
-  useEffect(() => {
-    if (ready) return;
-    const t = setTimeout(() => setSlow(true), SLOW_START_MS);
-    return () => clearTimeout(t);
-  }, [ready]);
-
-  if (!ready) {
-    return (
-      <Splash
-        message="Claiming this tab’s identity…"
-        hint={
-          slow
-            ? "Still waiting. If this tab was duplicated, the original copy may be holding the identity — it will fork into a new letter in a moment."
-            : undefined
-        }
-      />
-    );
-  }
-  return <BoardSurface session={session} compact={compact} />;
 }

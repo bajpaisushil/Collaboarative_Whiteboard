@@ -90,9 +90,9 @@ function CableSwitch({ compact }: { compact: boolean }) {
       >
         <CableGraphic online={online} color={color} compact={compact} />
         <span className="flex flex-col leading-none">
-          <span className="text-[13px] font-semibold text-ink">{online ? "Online" : "Offline"}</span>
+          <span className="text-[13px] font-semibold text-ink @max-[400px]:hidden">{online ? "Online" : "Offline"}</span>
           {!compact && (
-            <span className="mt-[3px] whitespace-nowrap font-mono text-[10px] tabular-nums text-muted @max-3xl:hidden">{sub}</span>
+            <span className="mt-[3px] whitespace-nowrap font-mono text-[10px] tabular-nums text-muted @max-[1000px]:hidden">{sub}</span>
           )}
         </span>
       </button>

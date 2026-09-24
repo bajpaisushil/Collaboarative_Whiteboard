@@ -5,11 +5,12 @@ import { useSessionState } from "@/lib/session/react";
 import { threadColor } from "@/lib/ui/colors";
 import { TipBody, Tooltip } from "@/components/ui/Tooltip";
 import { openPeerTab, SPLIT_HREF } from "../links";
-import { selectNextLabel, selectRoom } from "../selectors";
+import { selectRoom } from "../selectors";
+import { useNextLabel } from "../useNextLabel";
 
 export function TabLinks() {
   const room = useSessionState(selectRoom);
-  const next = useSessionState(selectNextLabel);
+  const next = useNextLabel();
   const color = threadColor(next);
   return (
     <div className="flex shrink-0 items-center gap-1">
@@ -36,7 +37,7 @@ export function TabLinks() {
           >
             {next}
           </span>
-          <span className="whitespace-nowrap @max-5xl:sr-only">Open Tab {next}</span>
+          <span className="whitespace-nowrap @max-[1380px]:sr-only">Open Tab {next}</span>
           <SquareArrowOutUpRight aria-hidden className="size-3.5 text-muted" />
         </button>
       </Tooltip>
@@ -47,7 +48,7 @@ export function TabLinks() {
         className="flex h-8 items-center gap-1.5 rounded-[10px] px-2 text-[12.5px] font-medium text-ink-2 hover:bg-panel-2 hover:text-ink"
       >
         <Columns2 aria-hidden className="size-[17px]" strokeWidth={1.75} />
-        <span className="whitespace-nowrap @max-6xl:hidden">Split view</span>
+        <span className="whitespace-nowrap @max-[1500px]:hidden">Split view</span>
       </a>
     </div>
   );

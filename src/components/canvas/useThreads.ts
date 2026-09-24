@@ -27,23 +27,23 @@ export function useThreads(): (replica: ReplicaId) => Thread {
   const self = useSessionState((s) => s.replica);
   const selfLabel = useSessionState((s) => s.label);
   return useMemo(() => {
-    const labels = new Map<string, string>();
+    // Built once per directory change; lookups never allocate, so memoised consumers get
+    // the same Thread object for the same replica on every render.
+    const byReplica = new Map<ReplicaId, Thread>();
     for (const part of sig.split(";")) {
       if (!part) continue;
       const eq = part.indexOf("=");
-      labels.set(part.slice(0, eq), part.slice(eq + 1));
+      const id = part.slice(0, eq);
+      byReplica.set(id, makeThread(part.slice(eq + 1), false));
     }
-    const cache = new Map<ReplicaId, Thread>();
-    return (replica: ReplicaId) => {
-      const hit = cache.get(replica);
-      if (hit) return hit;
-      const isSelf = replica === self;
-      const label = isSelf ? selfLabel : (labels.get(replica) ?? "?");
-      const t = { label, color: threadColor(label), dash: threadDash(label), self: isSelf };
-      cache.set(replica, t);
-      return t;
-    };
+    byReplica.set(self, makeThread(selfLabel, true));
+    const unknown = makeThread("?", false);
+    return (replica: ReplicaId) => byReplica.get(replica) ?? unknown;
   }, [sig, self, selfLabel]);
+}
+
+function makeThread(label: string, self: boolean): Thread {
+  return { label, color: threadColor(label), dash: threadDash(label), self };
 }
 
 export function useColorOf(): (replica: ReplicaId) => string {
@@ -54,5 +54,5 @@ export function useColorOf(): (replica: ReplicaId) => string {
 /** The local replica's thread (selection chrome, carets, handles). */
 export function useSelfThread(): Thread {
   const label = useSessionState((s) => s.label);
-  return useMemo(() => ({ label, color: threadColor(label), dash: threadDash(label), self: true }), [label]);
+  return useMemo(() => makeThread(label, true), [label]);
 }

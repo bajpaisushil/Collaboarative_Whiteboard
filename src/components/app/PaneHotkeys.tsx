@@ -31,8 +31,15 @@ export function PaneHotkeys() {
         });
         return;
       }
-      if (redo) session.redo();
-      else session.undo();
+      const result = redo ? session.redo() : session.undo();
+      if (!result) {
+        toast.push({
+          id: "undo",
+          title: redo ? "Nothing to redo" : "Nothing of yours to undo",
+          detail: redo ? undefined : "Undo only reverses this tab’s own edits — other tabs undo theirs.",
+          durationMs: 2600,
+        });
+      }
     };
 
     // Cable switch: works even while typing (it's a modifier chord, never text).

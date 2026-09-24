@@ -31,9 +31,3 @@ export function listLabels(labels: readonly string[]): string {
   if (labels.length === 1) return labels[0];
   return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
 }
-
-/** "Tab B", "Tabs B and C". */
-export function tabsPhrase(labels: readonly string[]): string {
-  if (labels.length === 0) return "other tabs";
-  return `${labels.length === 1 ? "Tab" : "Tabs"} ${listLabels(labels)}`;
-}

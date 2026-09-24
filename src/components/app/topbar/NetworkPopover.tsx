@@ -12,7 +12,7 @@ import { Slider } from "@/components/ui/Slider";
 import { Switch } from "@/components/ui/Switch";
 import { STATUS_WORD, ThreadBadge } from "@/components/ui/ThreadBadge";
 import { formatSkew } from "../format";
-import { isChaotic, selectChaotic, selectNetwork, selectPeers, selectRtcEnabled, selectTraffic } from "../selectors";
+import { isChaotic, selectChaotic, selectNetwork, selectNamedPeers, selectRtcEnabled, selectTraffic } from "../selectors";
 
 export function NetworkPopover() {
   const chaotic = useSessionState(selectChaotic);
@@ -183,7 +183,7 @@ function Traffic() {
 }
 
 function Links() {
-  const peers = useSessionState(selectPeers);
+  const peers = useSessionState(selectNamedPeers);
   const shown = peers.filter((p) => p.status !== "left");
   return (
     <div className="border-t border-dashed border-line px-4 pb-3.5 pt-3">

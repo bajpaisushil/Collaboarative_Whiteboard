@@ -26,10 +26,10 @@ const THREADS = [
   { d: wave((Math.PI * 4) / 3, 18), color: "var(--thread-c)" },
 ] as const;
 
-function Threads() {
+function Threads({ scale = 1 }: { scale?: number }) {
   const reduce = useReducedMotion();
   return (
-    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} fill="none" aria-hidden className="overflow-visible">
+    <svg width={W * scale} height={H * scale} viewBox={`0 0 ${W} ${H}`} fill="none" aria-hidden className="overflow-visible">
       {THREADS.map((t, i) =>
         reduce ? (
           <path key={i} d={t.d} stroke={t.color} strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" />
@@ -56,14 +56,29 @@ function Threads() {
   );
 }
 
-export function Splash({ message = "Threading this tab…", hint }: { message?: ReactNode; hint?: ReactNode }) {
+export interface SplashProps {
+  message?: ReactNode;
+  hint?: ReactNode;
+  /** Smaller variant for embedded panes (/split). */
+  compact?: boolean;
+}
+
+export function Splash({ message = "Threading this tab…", hint, compact = false }: SplashProps) {
   return (
     <div role="status" aria-live="polite" className="grid h-full w-full place-items-center bg-paper px-6 text-ink">
       <div className="flex flex-col items-center">
-        <Threads />
-        <p className="mt-5 font-serif text-[52px] italic leading-none tracking-[-0.02em] text-ink">Weave</p>
-        <p className="mt-2 text-[12.5px] tracking-wide text-muted">the whiteboard that explains its merges</p>
-        <p className="mt-8 text-[13px] text-ink-2">{message}</p>
+        <Threads scale={compact ? 0.6 : 1} />
+        <p
+          className={
+            compact
+              ? "mt-3 font-serif text-[34px] italic leading-none tracking-[-0.02em] text-ink"
+              : "mt-5 font-serif text-[52px] italic leading-none tracking-[-0.02em] text-ink"
+          }
+        >
+          Weave
+        </p>
+        {!compact && <p className="mt-2 text-[12.5px] tracking-wide text-muted">the whiteboard that explains its merges</p>}
+        <p className={compact ? "mt-4 text-[12.5px] text-ink-2" : "mt-8 text-[13px] text-ink-2"}>{message}</p>
         {hint && <p className="mt-2 max-w-sm text-center text-[12px] leading-snug text-muted">{hint}</p>}
       </div>
     </div>

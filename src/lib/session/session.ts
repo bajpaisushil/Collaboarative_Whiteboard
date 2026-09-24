@@ -123,6 +123,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
   private conditions: NetworkConditions;
   private offlineSince: number | null = null;
   private peers = new Map<ReplicaId, PeerRecord>();
+  private announced = new Set<ReplicaId>();
   private inflight = new Map<ReplicaId, { vc: VectorClock; until: number }>();
   private window: MergeWindow | null = null;
   private mergeHistory: MergeReport[] = [];
@@ -546,11 +547,16 @@ export class WhiteboardSession implements WhiteboardSessionApi {
         status: "online",
       };
       this.peers.set(msg.from, p);
-      this.emit({ type: "peer-joined", replica: msg.from });
     }
+    const announce = (p.left || (p.label === "?" && msg.label !== "?") || !this.announced.has(msg.from)) && msg.label !== "?";
     const prevVc = p.vc;
     Object.assign(p, { nonce: msg.nonce, label: msg.label, vc: msg.vc, stateHash: msg.stateHash, lastSeen: t, visible: msg.visible, left: false, rtc: msg.rtc });
     p.status = msg.visible ? "online" : "idle";
+    // Announce once the peer has a letter — and again when a tab that said bye comes back.
+    if (announce) {
+      this.announced.add(msg.from);
+      this.emit({ type: "peer-joined", replica: msg.from });
+    }
     // An unreachable peer came back with edits we haven't seen → a merge moment for us too.
     const ourVc = this.replica.getView().vc;
     if ((wasAway || reconnecting) && this.conditions.online && !vcLeq(msg.vc, ourVc) && !this.window) {
@@ -610,6 +616,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       case "bye": {
         const p = this.peers.get(msg.from);
         if (p) {
+          this.announced.delete(msg.from);
           p.left = true;
           p.status = "left";
           p.presence = null;

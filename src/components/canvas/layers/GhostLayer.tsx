@@ -44,7 +44,10 @@ function computeGhost(session: WhiteboardSessionApi, g: NonNullable<UiState["gho
     return { real, ghost, color: "var(--focus)", thread: null, label: cf.title };
   }
   const conflict = findConflict(session, g.conflictId);
-  const side = g.opId ?? conflict?.ops.find((o) => o !== conflict.winner) ?? conflict?.ops[1];
+  // Concurrent typing is merged, not picked: there is no losing side to draw (the explainer
+  // shows the woven text instead; the focus halo marks the shape).
+  if (conflict?.kind === "concurrent-text") return null;
+  const side =g.opId ?? conflict?.ops.find((o) => o !== conflict.winner) ?? conflict?.ops[1];
   const res = r.ghost(g.conflictId, side);
   const shapeId = conflict?.shapeId ?? res?.shape?.id;
   if (!res || !shapeId) return null;

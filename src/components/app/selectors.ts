@@ -17,7 +17,6 @@ export const selectReplica = (s: SessionState) => s.replica;
 export const selectForkedFrom = (s: SessionState) => s.forkedFrom;
 export const selectOnline = (s: SessionState) => s.network.online;
 export const selectNetwork = (s: SessionState) => s.network;
-export const selectPeers = (s: SessionState) => s.peers;
 export const selectUnsynced = (s: SessionState) => s.unsyncedLocalOps;
 export const selectOfflineSince = (s: SessionState) => s.offlineSince;
 export const selectRtcEnabled = (s: SessionState) => s.rtcEnabled;
@@ -30,16 +29,43 @@ export const selectLivePeerCount = (s: SessionState) => {
   return n;
 };
 
-/** Smallest letter not used by us or any peer that hasn't left — the label a new tab will get. */
-export const selectNextLabel = (s: SessionState): string => {
-  const used = new Set<string>([s.label.charAt(0).toUpperCase()]);
-  for (const p of s.peers) if (p.status !== "left") used.add(p.label.charAt(0).toUpperCase());
+/** Label "?" means "not chosen yet" (a tab still booting) — never show it as an identity. */
+export const UNSET_LABEL = "?";
+export const hasLabel = (p: { label: string }): boolean => p.label !== UNSET_LABEL && p.label !== "";
+
+/** Peers that can be shown with an identity (booting tabs without a letter are skipped). */
+export const selectNamedPeers = (s: SessionState): PeerInfo[] => {
+  let all = true;
+  for (const p of s.peers) if (!hasLabel(p)) all = false;
+  return all ? s.peers : s.peers.filter(hasLabel);
+};
+
+/** Letters in use by live peers, as a stable string key ("B,C"). */
+export const selectPeerLettersKey = (s: SessionState): string =>
+  s.peers
+    .filter((p) => p.status !== "left" && hasLabel(p))
+    .map((p) => p.label)
+    .join(",");
+
+/**
+ * The letter a newly opened tab will most likely pick: the smallest letter not used by us,
+ * by any live peer, or by any replica in the history (mirrors the session's label rule).
+ */
+export function nextFreeLabel(self: string, peerLetters: readonly string[], history: Iterable<string>): string {
+  const used = new Set<string>();
+  const add = (l: string) => {
+    const letter = l.replace(/\d+$/, "").toUpperCase();
+    if (letter && letter !== UNSET_LABEL) used.add(letter);
+  };
+  add(self);
+  for (const l of peerLetters) add(l);
+  for (const l of history) add(l);
   for (let i = 0; i < 26; i++) {
     const l = String.fromCharCode(65 + i);
     if (!used.has(l)) return l;
   }
-  return "?";
-};
+  return "Z";
+}
 
 export function isChaotic(n: NetworkConditions): boolean {
   return n.latencyMs > 0 || n.jitterMs > 0 || n.dropRate > 0 || n.duplicateRate > 0 || n.clockSkewMs !== 0;
@@ -63,14 +89,15 @@ export const selectRedoLabel = (v: ReplicaView) => v.redoLabel;
 
 /**
  * Display label for any replica id, read imperatively (event handlers): live peers first,
- * then the replica directory derived from the log.
+ * then the replica directory derived from the log. Null while the letter isn't known yet.
  */
-export function labelOf(session: WhiteboardSessionApi, replica: ReplicaId): string {
+export function labelOf(session: WhiteboardSessionApi, replica: ReplicaId): string | null {
   const state = session.getState();
-  if (replica === state.replica) return state.label;
+  if (replica === state.replica) return hasLabel(state) ? state.label : null;
   const peer = state.peers.find((p) => p.replica === replica);
-  if (peer) return peer.label;
-  return session.replica.getView().replicas.get(replica)?.label ?? "?";
+  if (peer && hasLabel(peer)) return peer.label;
+  const known = session.replica.getView().replicas.get(replica)?.label;
+  return known && known !== UNSET_LABEL ? known : null;
 }
 
 /** Most recent live knot (highest Lamport), or null. */

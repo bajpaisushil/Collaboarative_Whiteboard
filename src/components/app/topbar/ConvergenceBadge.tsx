@@ -12,7 +12,7 @@ import { useReplicaView, useSession, useSessionState } from "@/lib/session/react
 import { FingerprintGlyph } from "@/components/ui/FingerprintGlyph";
 import { TipBody, Tooltip } from "@/components/ui/Tooltip";
 import { listLabels } from "../format";
-import { isLivePeer, selectOnline, selectPeers, selectStateHash } from "../selectors";
+import { isLivePeer, selectOnline, selectNamedPeers, selectStateHash } from "../selectors";
 
 type Verdict =
   | { kind: "diverged"; labels: string[] }
@@ -36,7 +36,7 @@ function verdictOf(peers: readonly PeerInfo[], online: boolean): Verdict {
 export function ConvergenceBadge() {
   const session = useSession();
   const hash = useReplicaView(selectStateHash);
-  const peers = useSessionState(selectPeers);
+  const peers = useSessionState(selectNamedPeers);
   const online = useSessionState(selectOnline);
   const v = verdictOf(peers, online);
 
@@ -107,7 +107,7 @@ export function ConvergenceBadge() {
       >
         <FingerprintGlyph hash={hash} size={24} title={`State fingerprint ${hash.slice(0, 8)}`} />
         {icon}
-        <span className="whitespace-nowrap @max-4xl:sr-only">{text}</span>
+        <span className="whitespace-nowrap @max-[1170px]:sr-only">{text}</span>
       </button>
     </Tooltip>
   );

@@ -183,20 +183,22 @@ export class CanvasController {
     const shapes = set ? view.shapes.filter((s) => set.has(s.id)) : view.shapes;
     const box = unionRects(shapes.map(displayBounds));
     const { w, h } = this.viewportSize();
-    if (!box || w === 0) return;
+    if (!box || w <= 0 || h <= 0) return;
     this.d.ui.getState().setCamera(fitCamera(box, w, h));
   }
 
   /** Centre the camera on a world rect without changing zoom (unless it doesn't fit). */
   reveal(r: Rect): void {
     const { w, h } = this.viewportSize();
+    if (w <= 0 || h <= 0) return; // not laid out (hidden pane)
     const cam = this.d.ui.getState().camera;
     const vx0 = cam.x,
       vy0 = cam.y,
       vx1 = cam.x + w / cam.zoom,
       vy1 = cam.y + h / cam.zoom;
     if (r.x >= vx0 && r.y >= vy0 && r.x + r.w <= vx1 && r.y + r.h <= vy1) return;
-    const zoom = Math.min(cam.zoom, clampZoom(Math.min((w - 96) / Math.max(1, r.w), (h - 96) / Math.max(1, r.h))));
+    const pad = Math.min(96, w * 0.25, h * 0.25);
+    const zoom = Math.min(cam.zoom, clampZoom(Math.min((w - pad) / Math.max(1, r.w), (h - pad) / Math.max(1, r.h))));
     this.d.ui.getState().setCamera({ zoom, x: r.x + r.w / 2 - w / zoom / 2, y: r.y + r.h / 2 - h / zoom / 2 });
   }
 
@@ -497,6 +499,15 @@ export class CanvasController {
     this.release(e.pointerId);
     this.commit(g);
     this.updateCursor();
+    // Released outside the board (pointer capture kept us informed until now): hide our
+    // cursor for peers, as a plain pointerleave would have.
+    const s = this.screen(e);
+    const r = this.bounds();
+    if (s.x < 0 || s.y < 0 || s.x > r.width || s.y > r.height) {
+      this.cursor = null;
+      this.cursorDirty = true;
+      this.schedule();
+    }
   };
 
   private onPointerCancel = (e: PointerEvent) => {

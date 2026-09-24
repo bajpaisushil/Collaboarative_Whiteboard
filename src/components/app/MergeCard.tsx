@@ -6,12 +6,13 @@
  */
 import { ArrowRight, X } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Conflict } from "@/lib/crdt/types";
 import type { MergeReport, WhiteboardSessionApi } from "@/lib/session/types";
 import { useSession, useSessionEvent, useSessionState } from "@/lib/session/react";
 import { threadColor } from "@/lib/ui/colors";
 import { useUiStore } from "@/lib/ui/store";
+import { handOffFocus } from "@/components/ui/focus";
 import { KnotIcon } from "@/components/ui/KnotIcon";
 import { ThreadBadge } from "@/components/ui/ThreadBadge";
 import { formatDuration, listLabels, plural } from "./format";
@@ -27,23 +28,45 @@ interface Fact {
 
 interface MergeCardModel {
   id: string;
-  direction: MergeReport["direction"];
-  peerLabels: string[];
+  /** First peer's letter for the glyph (null when unknown). */
+  peerLabel: string | null;
   title: string;
   facts: Fact[];
   knots: number;
+  /** Conflicts this merge created (knots + benign/superseded ones). */
+  conflicts: number;
   explain: { id: string; lineageKey: string } | null;
   announcement: string;
 }
 
+/** Letters of the tabs involved: the report's peers, else the authors of the received edits. */
+function peerLabelsOf(report: MergeReport, session: WhiteboardSessionApi): string[] {
+  const self = session.getState().replica;
+  const ids = new Set<string>(report.peers.filter((r) => r !== self));
+  if (ids.size === 0) {
+    for (const opId of report.receivedOpIds) {
+      const author = session.replica.getOp(opId)?.replica ?? opId.slice(0, opId.lastIndexOf(":"));
+      if (author && author !== self) ids.add(author);
+    }
+  }
+  const labels = new Set<string>();
+  for (const r of ids) {
+    const l = labelOf(session, r);
+    if (l) labels.add(l);
+  }
+  return [...labels].sort();
+}
+
 function buildModel(report: MergeReport, session: WhiteboardSessionApi): MergeCardModel | null {
-  const peerLabels = report.peers.map((r) => labelOf(session, r));
+  const peerLabels = peerLabelsOf(report, session);
   const peers = listLabels(peerLabels);
+  const who = peers || "another tab";
   const byId = new Map(session.replica.getView().conflicts.map((c) => [c.id, c] as const));
   const fresh = report.newConflicts.map((id) => byId.get(id)).filter((c): c is Conflict => c !== undefined);
   const knotList = fresh.filter(isLiveKnot);
   const knots = knotList.length;
   const received = report.receivedOpIds.length;
+  const offline = report.receivedOpIds.reduce((n, id) => n + (session.replica.getOp(id)?.meta.offline ? 1 : 0), 0);
   const sent = report.sentCount;
   const revived = report.resurrected.length;
   const target = knotList[0] ?? fresh[0] ?? null;
@@ -52,16 +75,25 @@ function buildModel(report: MergeReport, session: WhiteboardSessionApi): MergeCa
   const facts: Fact[] = [];
   switch (report.direction) {
     case "rejoined": {
-      if (peerLabels.length === 0 && received === 0 && sent === 0) return null;
+      if (received === 0 && sent === 0) return null;
       const apart = report.apartMs >= 1000 ? ` after ${formatDuration(report.apartMs)}` : "";
-      title = peerLabels.length > 0 ? `Rejoined ${peers}${apart}` : `Back online${apart}`;
+      title = peers ? `Rejoined ${peers}${apart}` : `Back online${apart}`;
       facts.push({ text: `you brought ${plural(sent, "edit")}` }, { text: `${peers || "others"} brought ${received}` });
       break;
     }
     case "peer-returned": {
       if (received === 0 && sent === 0 && fresh.length === 0) return null;
       const verb = peerLabels.length > 1 ? "are" : "is";
-      title = received > 0 ? `${peers} ${verb} back with ${plural(received, "offline edit")}` : `${peers} ${verb} back`;
+      if (offline > 0) {
+        // They were unplugged (or unreachable) and came back with edits made meanwhile.
+        title = `${peers || "A tab"} ${verb} back with ${plural(offline, "offline edit")}`;
+        if (received > offline) facts.push({ text: `+${received - offline} more` });
+      } else if (received > 0) {
+        // Both online, but slow links let edits cross in flight.
+        title = `Merged ${plural(received, "edit")} from ${who} that crossed yours`;
+      } else {
+        title = `${peers || "A tab"} ${verb} back`;
+      }
       facts.push({ text: sent > 0 ? `you had ${plural(sent, "edit")} they hadn’t seen` : "they’d seen all your edits" });
       break;
     }
@@ -78,11 +110,11 @@ function buildModel(report: MergeReport, session: WhiteboardSessionApi): MergeCa
 
   return {
     id: report.id,
-    direction: report.direction,
-    peerLabels,
+    peerLabel: peerLabels[0] ?? null,
     title,
     facts,
     knots,
+    conflicts: fresh.length,
     explain: target ? { id: target.id, lineageKey: target.lineageKey } : null,
     announcement: `${title}. ${facts.map((f) => f.text).join(", ")}.`,
   };
@@ -162,9 +194,14 @@ function CardView({
 }) {
   const reduce = useReducedMotion();
   const selfLabel = useSessionState(selectLabel);
-  const peerLabel = card.peerLabels[0] ?? "?";
+  const ref = useRef<HTMLElement>(null);
+  const leave = (then: () => void) => () => {
+    handOffFocus(ref.current);
+    then();
+  };
   return (
     <motion.section
+      ref={ref}
       aria-label="Merge report"
       initial={reduce ? { opacity: 0 } : { opacity: 0, y: -14, scale: 0.97 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -177,7 +214,7 @@ function CardView({
       className="sheet pointer-events-auto w-full max-w-[480px] overflow-hidden"
     >
       <div className="flex items-center gap-3 py-3 pl-3 pr-2">
-        <MergeGlyph self={selfLabel} peer={peerLabel} knot={card.knots > 0} animate={!reduce} />
+        <MergeGlyph self={selfLabel} peer={card.peerLabel} knot={card.knots > 0} animate={!reduce} />
         <div className="min-w-0 flex-1">
           <p className="text-[13.5px] font-semibold leading-snug text-ink">{card.title}</p>
           <p className="mt-0.5 text-[12.5px] leading-snug text-ink-2">
@@ -195,7 +232,7 @@ function CardView({
         </div>
         <button
           type="button"
-          onClick={onDismiss}
+          onClick={leave(onDismiss)}
           aria-label="Dismiss merge report"
           title="Dismiss"
           className="grid size-7 shrink-0 place-items-center self-start rounded-[8px] text-muted hover:bg-panel-2 hover:text-ink"
@@ -203,16 +240,20 @@ function CardView({
           <X aria-hidden className="size-4" />
         </button>
       </div>
-      {card.knots > 0 && (
+      {card.explain && (
         <div className="flex items-center gap-2 border-t border-line bg-panel-2 py-2 pl-3.5 pr-2">
-          <KnotIcon size={16} className="shrink-0 text-knot" />
+          <KnotIcon size={16} className={card.knots > 0 ? "shrink-0 text-knot" : "shrink-0 text-muted"} />
           <p className="min-w-0 flex-1 text-[12px] leading-snug text-ink-2">
-            {card.knots === 1 ? "Two tabs changed the same thing at the same time." : "Tabs changed the same things at the same time."}{" "}
-            <span className="text-muted">See how each was decided.</span>
+            {card.knots > 1
+              ? "Tabs changed the same things at the same time — neither had seen the other’s edit."
+              : card.knots === 1
+                ? "Two tabs changed the same thing at the same time — neither had seen the other’s edit."
+                : "Tabs edited the same thing at once, but it didn’t change the result."}{" "}
+            <span className="text-muted">See how {card.conflicts === 1 ? "it was" : "each was"} decided.</span>
           </p>
           <button
             type="button"
-            onClick={onExplain}
+            onClick={leave(onExplain)}
             className="flex shrink-0 items-center gap-1 rounded-[9px] bg-ink px-2.5 py-1.5 text-[12px] font-semibold text-paper hover:bg-ink-2"
           >
             Explain
@@ -225,13 +266,17 @@ function CardView({
 }
 
 /** Two labelled threads converging into one woven line (with a knot where they met). */
-function MergeGlyph({ self, peer, knot, animate }: { self: string; peer: string; knot: boolean; animate: boolean }) {
-  const a = threadColor(peer);
+function MergeGlyph({ self, peer, knot, animate }: { self: string; peer: string | null; knot: boolean; animate: boolean }) {
+  const a = peer ? threadColor(peer) : "var(--muted)";
   const b = threadColor(self);
   return (
     <div className="flex shrink-0 items-center">
       <div className="flex flex-col gap-[10px]">
-        <ThreadBadge label={peer} size="xs" />
+        {peer ? (
+          <ThreadBadge label={peer} size="xs" />
+        ) : (
+          <span aria-hidden className="size-[18px] rounded-full border-[1.5px] border-dashed border-line-2 bg-panel" />
+        )}
         <ThreadBadge label={self} size="xs" />
       </div>
       <svg width="40" height="46" viewBox="0 0 40 46" fill="none" aria-hidden className="-ml-px">

@@ -22,6 +22,16 @@ export interface ShapeSvgProps {
   hideText?: boolean;
   /** Extra opacity multiplier (remote previews, drafts). Default 1. */
   fade?: number;
+  /**
+   * X-ray: wash the shape's own paint toward the paper so authorship tints and knots read
+   * first. Pure paint (no filters), so it costs nothing while panning; text stays full ink.
+   */
+  muted?: boolean;
+}
+
+/** Paint mixed toward the paper — "desaturated" in both themes. */
+function mute(color: string, keep = 52): string {
+  return color === "none" ? color : `color-mix(in oklab, ${color} ${keep}%, var(--paper))`;
 }
 
 const STICKY_DEFAULT = "#ffe58a";
@@ -80,12 +90,14 @@ function TextBlock({
   );
 }
 
-function ShapeSvgImpl({ shape: raw, authorship, colorOf, ghost, ghostColor = "var(--knot)", hideText, fade = 1 }: ShapeSvgProps) {
+function ShapeSvgImpl({ shape: raw, authorship, colorOf, ghost, ghostColor = "var(--knot)", hideText, fade = 1, muted = false }: ShapeSvgProps) {
   const s = displayShape(raw);
   const opacity = (ghost ? 0.9 : s.opacity) * fade;
   const dash = ghost ? "6 5" : undefined;
-  const strokeColor = ghost ? ghostColor : paint(s.stroke);
-  const fill = hasFill(s.fill) ? paint(s.fill) : "none";
+  const wash = muted && !ghost;
+  const strokeColor = ghost ? ghostColor : wash ? mute(paint(s.stroke)) : paint(s.stroke);
+  const rawFill = hasFill(s.fill) ? paint(s.fill) : "none";
+  const fill = wash ? mute(rawFill) : rawFill;
   const ghostFill = ghost ? (fill === "none" ? "none" : `color-mix(in oklab, ${fill} 35%, transparent)`) : fill;
 
   switch (s.type) {
@@ -169,7 +181,8 @@ function ShapeSvgImpl({ shape: raw, authorship, colorOf, ghost, ghostColor = "va
     }
     case "sticky": {
       const b = shapeBounds(s);
-      const paper = fill === "none" ? STICKY_DEFAULT : fill;
+      // Sticky paper keeps more of its colour: its ink text must stay readable on navy too.
+      const paper = wash ? mute(rawFill === "none" ? STICKY_DEFAULT : rawFill, 74) : rawFill === "none" ? STICKY_DEFAULT : rawFill;
       return (
         <g opacity={opacity}>
           {!ghost && <rect x={b.x + 1.5} y={b.y + 4} width={b.w} height={b.h} rx={6} fill="#0000001c" />}
@@ -194,9 +207,14 @@ function ShapeSvgImpl({ shape: raw, authorship, colorOf, ghost, ghostColor = "va
     }
     case "text": {
       const b = shapeBounds(s);
+      // An empty text box would be invisible: show a faint dashed placeholder instead.
+      const placeholder = !ghost && !hideText && s.text.length === 0;
       return (
         <g opacity={opacity}>
           {ghost && <rect x={b.x} y={b.y} width={b.w} height={b.h} fill="none" stroke={ghostColor} strokeDasharray={dash} rx={4} />}
+          {placeholder && (
+            <rect x={b.x} y={b.y} width={b.w} height={b.h} fill="none" stroke="var(--line-2)" strokeDasharray="4 4" rx={4} vectorEffect="non-scaling-stroke" />
+          )}
           {!hideText && (
             <TextBlock shape={s} authorship={authorship} colorOf={colorOf} color={ghost ? ghostColor : paint(s.stroke)} padding={TEXT_PADDING} clip={false} />
           )}

@@ -3,7 +3,7 @@
  * Knots: a badge at the top-right of every shape with a live conflict. Hover (or keyboard
  * focus) shows the one-line story; click opens the explainer for that conflict.
  */
-import { memo, useMemo } from "react";
+import { memo, useEffect, useMemo } from "react";
 import type { Conflict, ShapeId } from "@/lib/crdt/types";
 import { useReplicaView, useSession } from "@/lib/session/react";
 import { useUi, useUiStore } from "@/lib/ui/store";
@@ -25,6 +25,7 @@ export const KnotLayer = memo(function KnotLayer() {
   const zoom = useUi((s) => s.camera.zoom);
   const focusId = useUi((s) => s.focus?.id ?? null);
   const hidden = useInteraction((s) => s.hidden);
+  const ix = useInteractionStore();
 
   const knots = useMemo(() => {
     const out: KnotSpec[] = [];
@@ -38,6 +39,21 @@ export const KnotLayer = memo(function KnotLayer() {
     }
     return out;
   }, [conflictsByShape, byId]);
+
+  // Keep the tooltip honest: drop it when its knot is untied / hidden, follow the shape if
+  // it moved, and never leave it behind when this layer goes away (time travel).
+  useEffect(() => {
+    const h = ix.getState().knotHover;
+    if (!h) return;
+    const kn = knots.find((x) => x.shapeId === h.shapeId);
+    if (!kn || hidden.has(kn.shapeId)) ix.setState({ knotHover: null });
+    else {
+      const ids = kn.conflicts.map((c) => c.id);
+      const same = ids.length === h.conflictIds.length && ids.every((id, i) => id === h.conflictIds[i]);
+      if (kn.x !== h.x || kn.y !== h.y || !same) ix.setState({ knotHover: { ...h, x: kn.x, y: kn.y, conflictIds: ids } });
+    }
+  }, [knots, hidden, ix]);
+  useEffect(() => () => ix.setState({ knotHover: null }), [ix]);
 
   if (knots.length === 0) return null;
   const k = 1 / zoom;

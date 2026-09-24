@@ -7,14 +7,16 @@
 import clsx from "clsx";
 import { Check, Columns2, SquareArrowOutUpRight, X } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useReplicaView, useSessionState } from "@/lib/session/react";
 import { useUi } from "@/lib/ui/store";
+import { handOffFocus } from "@/components/ui/focus";
 import { Kbd } from "@/components/ui/Kbd";
 import { KnotIcon } from "@/components/ui/KnotIcon";
 import { ThreadBadge } from "@/components/ui/ThreadBadge";
 import { openPeerTab, SPLIT_HREF } from "./links";
-import { selectBoardEmpty, selectHasLivePeer, selectLabel, selectNextLabel, selectRoom } from "./selectors";
+import { selectBoardEmpty, selectHasLivePeer, selectLabel, selectRoom } from "./selectors";
+import { useNextLabel } from "./useNextLabel";
 
 const DISMISS_KEY = "weave:coach-dismissed";
 const ALONE_AFTER_MS = 2000;
@@ -71,10 +73,11 @@ export function Coach() {
 function CoachCard({ docked, onDismiss }: { docked: boolean; onDismiss: () => void }) {
   const reduce = useReducedMotion();
   const label = useSessionState(selectLabel);
-  const next = useSessionState(selectNextLabel);
+  const next = useNextLabel();
   const room = useSessionState(selectRoom);
   const empty = useReplicaView(selectBoardEmpty);
   const titleId = useId();
+  const ref = useRef<HTMLElement>(null);
 
   return (
     <div
@@ -84,6 +87,7 @@ function CoachCard({ docked, onDismiss }: { docked: boolean; onDismiss: () => vo
       )}
     >
       <motion.section
+        ref={ref}
         aria-labelledby={titleId}
         initial={reduce ? { opacity: 0 } : { opacity: 0, y: 12, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -93,7 +97,10 @@ function CoachCard({ docked, onDismiss }: { docked: boolean; onDismiss: () => vo
       >
         <button
           type="button"
-          onClick={onDismiss}
+          onClick={() => {
+            handOffFocus(ref.current);
+            onDismiss();
+          }}
           aria-label="Dismiss the getting-started guide"
           title="Dismiss"
           className="absolute right-2.5 top-2.5 grid size-7 place-items-center rounded-[8px] text-muted hover:bg-panel-2 hover:text-ink"

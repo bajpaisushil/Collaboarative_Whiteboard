@@ -11,6 +11,7 @@ import { memo, useEffect, useId, useRef, useState } from "react";
 import { useSession } from "@/lib/session/react";
 import { useUi, useUiStore } from "@/lib/ui/store";
 import { CanvasController } from "./controller";
+import { useDockSlotRef } from "./dockSlot";
 import { createInteractionStore, InteractionContext } from "./interaction";
 import { KnotTooltip } from "./KnotTooltip";
 import { EmptyHint, LiveRegion, TimeTravelTint } from "./overlays";
@@ -36,6 +37,7 @@ export function Canvas() {
   const controllerRef = useRef<CanvasController | null>(null);
   const gridId = `weave-grid-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const scrubbing = useUi((s) => s.scrub !== null);
+  const dockSlotRef = useDockSlotRef();
 
   // Gesture controller (native listeners: non-passive wheel, coalesced pointer events).
   useEffect(() => {
@@ -80,36 +82,40 @@ export function Canvas() {
     };
   }, [session, ui]);
 
-  useCanvasShortcuts(controllerRef);
+  useCanvasShortcuts(controllerRef, ix);
 
   return (
     <InteractionContext.Provider value={ix}>
-      <div
-        ref={containerRef}
-        data-canvas-root=""
-        tabIndex={0}
-        role="application"
-        aria-roledescription="whiteboard"
-        aria-label="Whiteboard canvas. Tools: V select, H pan, P pen, R rectangle, O ellipse, A arrow, S sticky note, T text, E eraser. Arrow keys nudge the selection, Delete removes it, W explains it."
-        className="absolute inset-0 overflow-hidden bg-paper outline-none focus-visible:shadow-[inset_0_0_0_2px_var(--focus)]"
-      >
-        <svg
-          ref={svgRef}
-          className="absolute inset-0 block h-full w-full touch-none select-none"
-          style={scrubbing ? { filter: "sepia(0.22) saturate(0.85)" } : undefined}
-          role="group"
-          aria-label={scrubbing ? "Board as it was (read-only)" : "Board"}
+      <div className="absolute inset-0 overflow-hidden bg-paper">
+        <div
+          ref={containerRef}
+          data-canvas-root=""
+          tabIndex={0}
+          role="application"
+          aria-roledescription="whiteboard"
+          aria-label="Whiteboard canvas. Tools: V select, H pan, P pen, R rectangle, O ellipse, A arrow, S sticky note, T text, E eraser. Arrow keys nudge the selection, Delete removes it, W explains it."
+          className="absolute inset-0 outline-none focus-visible:shadow-[inset_0_0_0_2px_var(--focus)]"
         >
-          <Viewport gridId={gridId}>
-            {scrubbing ? <ScrubLayers /> : <LiveLayers />}
-            <PresenceLayer cursorsOnly={scrubbing} />
-          </Viewport>
-        </svg>
-        <TextEditor />
-        <KnotTooltip />
-        {scrubbing && <TimeTravelTint />}
-        <EmptyHint />
-        <LiveRegion />
+          <svg
+            ref={svgRef}
+            className="absolute inset-0 block h-full w-full touch-none select-none"
+            style={scrubbing ? { filter: "sepia(0.22) saturate(0.85)" } : undefined}
+            role="group"
+            aria-label={scrubbing ? "Board as it was (read-only)" : "Board"}
+          >
+            <Viewport gridId={gridId}>
+              {scrubbing ? <ScrubLayers /> : <LiveLayers />}
+              <PresenceLayer cursorsOnly={scrubbing} />
+            </Viewport>
+          </svg>
+          <TextEditor />
+          <KnotTooltip />
+          {scrubbing && <TimeTravelTint />}
+          <EmptyHint />
+          <LiveRegion />
+        </div>
+        {/* Compact panes / narrow screens: <ToolDock> portals here (bottom-centre). */}
+        <div ref={dockSlotRef} data-canvas-dock-slot="" className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-3" />
       </div>
     </InteractionContext.Provider>
   );

@@ -2,8 +2,21 @@
 /**
  * Floating top sheet. Full: wordmark · identity · cable switch (hero) · peers · convergence ·
  * knots · mode · undo/redo · open-tab/split · panel · theme · help. Compact (/split panes):
- * identity · cable · peers · knots · undo/redo. Uses container queries so it adapts to the
- * pane's width, not the window's.
+ * identity · cable · peers · knots · undo/redo.
+ *
+ * It adapts to the PANE's width (container queries on the header), not the window's. Labels
+ * collapse to icons in priority order as the bar narrows (header width):
+ *   < 1500  split-view text, X-ray key cap
+ *   < 1380  wordmark text, "Open Tab B" text
+ *   < 1240  Draw / X-ray labels
+ *   < 1170  "You are", convergence verdict text
+ *   < 1000  cable sub-line, "Just you"
+ *   <  920  open-tab / split links
+ *   <  820  convergence badge, theme toggle
+ *   <  700  wordmark
+ *   <  650  mode toggle (X still works)
+ *   <  460  identity text (letter stays)   ← compact panes in a narrow split
+ *   <  400  "Online"/"Offline" text (the plug graphic and aria state stay)
  */
 import clsx from "clsx";
 import { CircleQuestionMark, PanelRightClose, PanelRightOpen } from "lucide-react";
@@ -42,28 +55,30 @@ function FullBar() {
       className="sheet @container relative flex items-center gap-1.5 px-2"
       style={{ height: TOPBAR_HEIGHT }}
     >
-      <Wordmark />
-      <Divider />
+      <Wordmark className="@max-[700px]:hidden" />
+      <Divider className="@max-[700px]:hidden" />
       <IdentityPill />
       <CableControl />
 
       <div className="flex min-w-0 flex-1 items-center justify-center gap-2 px-1">
         <PeerAvatars />
-        <span className="@max-3xl:hidden">
+        <span className="flex @max-[820px]:hidden">
           <ConvergenceBadge />
         </span>
       </div>
 
       <KnotCounter />
-      <ModeToggle />
+      <span className="flex @max-[650px]:hidden">
+        <ModeToggle />
+      </span>
       <Divider />
       <UndoRedo />
-      <Divider className="@max-3xl:hidden" />
-      <span className="flex items-center @max-3xl:hidden">
+      <Divider className="@max-[920px]:hidden" />
+      <span className="flex items-center @max-[920px]:hidden">
         <TabLinks />
       </span>
       <PanelToggle />
-      <span className="@max-2xl:hidden">
+      <span className="flex @max-[820px]:hidden">
         <ThemeToggle />
       </span>
       <HelpButton />
@@ -98,7 +113,7 @@ function PanelToggle() {
   return (
     <IconButton
       icon={open ? PanelRightClose : PanelRightOpen}
-      label={open ? "Close the Why panel" : "Open the Why panel — knots, loom, log, snapshots"}
+      label="Why panel — knots and snapshots"
       pressed={open}
       onClick={() => store.getState().set({ panelOpen: !open })}
     />
@@ -113,6 +128,7 @@ function HelpButton() {
       label="Keyboard shortcuts"
       shortcut="?"
       aria-keyshortcuts="?"
+      aria-haspopup="dialog"
       onClick={() => store.getState().set({ showShortcuts: true })}
     />
   );

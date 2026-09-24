@@ -37,7 +37,8 @@ export function wheelPixels(e: WheelEvent, pageHeight: number): { dx: number; dy
 export function fitCamera(r: Rect, vw: number, vh: number, padding = 64, maxZoom = 1.5): Camera {
   const w = Math.max(1, r.w),
     h = Math.max(1, r.h);
-  const zoom = clampZoom(Math.min(maxZoom, (vw - padding * 2) / w, (vh - padding * 2) / h));
+  const pad = Math.min(padding, vw / 5, vh / 5); // small panes keep most of their room
+  const zoom = clampZoom(Math.min(maxZoom, (vw - pad * 2) / w, (vh - pad * 2) / h));
   return { x: r.x + w / 2 - vw / zoom / 2, y: r.y + h / 2 - vh / zoom / 2, zoom };
 }
 

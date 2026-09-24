@@ -4,12 +4,13 @@
  * panes never both react. Ignored while typing.
  */
 import { useEffect, type RefObject } from "react";
+import type { StoreApi } from "zustand";
 import { useSession } from "@/lib/session/react";
 import { isTypingTarget, usePane, usePaneKeydown } from "@/lib/ui/pane";
 import { useUiStore } from "@/lib/ui/store";
 import type { CanvasController } from "./controller";
 import { deleteShapes, duplicateShapes, nudgeShapes, reorderShapes, selectedShapes } from "./commands";
-import { announce, useInteractionStore } from "./interaction";
+import { announce, type InteractionState } from "./interaction";
 import { TOOL_BY_KEY } from "./tools";
 
 /** Widgets that use arrows / Delete themselves (sliders, tabs, radio groups, lists…). */
@@ -26,10 +27,13 @@ const NUDGE: Record<string, [number, number]> = {
   ArrowDown: [0, 1],
 };
 
-export function useCanvasShortcuts(controllerRef: RefObject<CanvasController | null>): void {
+/**
+ * Called by <Canvas> itself (outside its own InteractionContext provider), so the
+ * interaction store is passed in rather than read from context.
+ */
+export function useCanvasShortcuts(controllerRef: RefObject<CanvasController | null>, ix: StoreApi<InteractionState>): void {
   const session = useSession();
   const ui = useUiStore();
-  const ix = useInteractionStore();
   const { rootRef } = usePane();
 
   usePaneKeydown((e) => {

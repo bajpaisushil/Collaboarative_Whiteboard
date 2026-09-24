@@ -27,18 +27,12 @@ export const ShapeLayer = memo(function ShapeLayer() {
     <g data-layer="shapes">
       {shapes.map((s) =>
         hidden.has(s.id) ? null : (
-          <ShapeSvg key={s.id} shape={s} authorship={xray} colorOf={xray ? colorOf : undefined} hideText={s.id === editing} />
+          <ShapeSvg key={s.id} shape={s} authorship={xray} colorOf={xray ? colorOf : undefined} hideText={s.id === editing} muted={xray} />
         ),
       )}
-      {xray && <XrayWash />}
     </g>
   );
 });
-
-/** X-ray washes the ink slightly toward the paper so thread tints and knots read first. */
-function XrayWash() {
-  return <rect x={-1e6} y={-1e6} width={2e6} height={2e6} fill="var(--paper)" opacity={0.3} pointerEvents="none" />;
-}
 
 function shapesAt(session: WhiteboardSessionApi, scrub: NonNullable<UiState["scrub"]>, version: number): ShapeView[] {
   if (version < 0) return [];
@@ -58,7 +52,7 @@ export const ScrubShapeLayer = memo(function ScrubShapeLayer() {
   return (
     <g data-layer="scrub-shapes">
       {shapes.map((s) => (
-        <ShapeSvg key={s.id} shape={s} authorship={xray} colorOf={xray ? colorOf : undefined} />
+        <ShapeSvg key={s.id} shape={s} authorship={xray} colorOf={xray ? colorOf : undefined} muted={xray} />
       ))}
     </g>
   );
@@ -69,13 +63,18 @@ export const PreviewLayer = memo(function PreviewLayer() {
   const hidden = useInteraction((s) => s.hidden);
   const preview = useInteraction((s) => s.preview);
   const byId = useReplicaView((v) => v.shapeById);
+  const xray = useUi((s) => s.mode === "xray");
   if (hidden.size === 0) return null;
+  // Keep the dragged shapes in their stacking order relative to each other.
+  const shapes = [...hidden]
+    .map((id) => byId.get(id))
+    .filter((s): s is ShapeView => s !== undefined)
+    .sort((a, b) => a.z - b.z || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return (
-    <g data-layer="preview">
-      {[...hidden].map((id) => {
-        const s = byId.get(id);
-        return s ? <ShapeSvg key={id} shape={withProps(s, preview?.get(id))} /> : null;
-      })}
+    <g data-layer="preview" pointerEvents="none">
+      {shapes.map((s) => (
+        <ShapeSvg key={s.id} shape={withProps(s, preview?.get(s.id))} muted={xray} />
+      ))}
     </g>
   );
 });

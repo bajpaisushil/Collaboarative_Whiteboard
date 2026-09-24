@@ -11,7 +11,7 @@ import { useSessionState } from "@/lib/session/react";
 import { useUiStore } from "@/lib/ui/store";
 import { STATUS_WORD, ThreadBadge } from "@/components/ui/ThreadBadge";
 import { TipBody, Tooltip } from "@/components/ui/Tooltip";
-import { selectPeers } from "../selectors";
+import { selectNamedPeers } from "../selectors";
 
 const MAX_SHOWN = 5;
 
@@ -29,7 +29,7 @@ function byStatusThenLabel(a: PeerInfo, b: PeerInfo): number {
 }
 
 export function PeerAvatars({ compact = false }: { compact?: boolean }) {
-  const peers = useSessionState(selectPeers);
+  const peers = useSessionState(selectNamedPeers);
   const sorted = useMemo(() => [...peers].sort(byStatusThenLabel), [peers]);
   const shown = sorted.slice(0, MAX_SHOWN);
   const extra = sorted.length - shown.length;
@@ -48,7 +48,7 @@ export function PeerAvatars({ compact = false }: { compact?: boolean }) {
           className="flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-dashed border-line-2 px-2.5 text-[12px] text-muted"
         >
           <Users aria-hidden className="size-3.5" />
-          <span className={compact ? "sr-only" : "@max-3xl:hidden"}>Just you</span>
+          <span className={compact ? "sr-only" : "@max-[1000px]:hidden"}>Just you</span>
         </span>
       </Tooltip>
     );

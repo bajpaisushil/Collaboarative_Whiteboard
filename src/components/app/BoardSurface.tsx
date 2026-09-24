@@ -30,9 +30,11 @@ import { DivergingBanner } from "./DivergingBanner";
 import { IdentityFrame } from "./IdentityFrame";
 import { MergeCard } from "./MergeCard";
 import { PaneHotkeys } from "./PaneHotkeys";
+import { ReadyGate } from "./ReadyGate";
 import { RegionBoundary } from "./RegionBoundary";
 import { SessionToasts } from "./SessionToasts";
 import { ShortcutSheet } from "./ShortcutSheet";
+import { applyStoredTheme } from "./theme";
 import { TOPBAR_HEIGHT, TOPBAR_HEIGHT_COMPACT, TopBar } from "./topbar/TopBar";
 import { WhyDrawer } from "./WhyDrawer";
 
@@ -54,20 +56,30 @@ const KEEPS_FOCUS =
 export function BoardSurface({ session, compact = false, uiStore, paneId = "main" }: BoardSurfaceProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const pane = useMemo<PaneContextValue>(() => ({ paneId, compact, rootRef }), [paneId, compact]);
+
+  // Routes other than "/" (e.g. /split) don't run the theme boot script: honour the stored choice.
+  useEffect(() => {
+    applyStoredTheme();
+  }, []);
+
   return (
-    <SessionProvider session={session}>
-      <UiStoreProvider store={uiStore}>
-        <PaneProvider value={pane}>
-          <ToastProvider>
-            <BoardLayout rootRef={rootRef} compact={compact} paneId={paneId} />
-          </ToastProvider>
-        </PaneProvider>
-      </UiStoreProvider>
-    </SessionProvider>
+    <ReadyGate session={session} compact={compact}>
+      <SessionProvider session={session}>
+        <UiStoreProvider store={uiStore}>
+          <PaneProvider value={pane}>
+            <ToastProvider>
+              <BoardLayout rootRef={rootRef} compact={compact} paneId={paneId} />
+            </ToastProvider>
+          </PaneProvider>
+        </UiStoreProvider>
+      </SessionProvider>
+    </ReadyGate>
   );
 }
 
 function BoardLayout({ rootRef, compact, paneId }: { rootRef: RefObject<HTMLDivElement | null>; compact: boolean; paneId: string }) {
+  // Hold keyboard focus in this pane (hotkeys are bound to its root) unless something else
+  // on the page already has it — e.g. the other pane in /split.
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
@@ -79,7 +91,9 @@ function BoardLayout({ rootRef, compact, paneId }: { rootRef: RefObject<HTMLDivE
     const root = rootRef.current;
     if (!root) return;
     const target = e.target instanceof Element ? e.target : null;
-    if (target?.closest(KEEPS_FOCUS)) return;
+    // Only look inside this pane: /split may wrap panes in focusable containers.
+    const keeper = target?.closest(KEEPS_FOCUS);
+    if (keeper && keeper !== root && root.contains(keeper)) return;
     if (document.activeElement !== root) root.focus({ preventScroll: true });
   };
 
@@ -93,6 +107,7 @@ function BoardLayout({ rootRef, compact, paneId }: { rootRef: RefObject<HTMLDivE
       ref={rootRef}
       tabIndex={-1}
       data-pane={paneId}
+      data-focus-home=""
       onPointerDownCapture={onPointerDownCapture}
       className="relative isolate flex h-full w-full flex-col overflow-hidden bg-paper text-ink outline-none"
       style={style}

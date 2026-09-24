@@ -16,8 +16,9 @@ import { useThreads } from "./useThreads";
 export const KnotTooltip = memo(function KnotTooltip() {
   const hover = useInteraction((s) => s.knotHover);
   const cam = useUi((s) => s.camera);
+  const scrubbing = useUi((s) => s.scrub !== null);
   const reduced = useReducedMotion() ?? false;
-  const pos = hover ? worldToScreen(cam, hover.x, hover.y) : null;
+  const pos = hover && !scrubbing ? worldToScreen(cam, hover.x, hover.y) : null;
   return (
     <AnimatePresence>
       {hover && pos && (

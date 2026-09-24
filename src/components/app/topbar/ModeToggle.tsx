@@ -32,8 +32,8 @@ export function ModeToggle() {
             )}
           >
             <Icon aria-hidden className="size-[15px]" strokeWidth={1.9} />
-            <span className="@max-5xl:sr-only">{m.label}</span>
-            {m.mode === "xray" && <Kbd className="ml-0.5 @max-5xl:hidden">X</Kbd>}
+            <span className="@max-[1240px]:sr-only">{m.label}</span>
+            {m.mode === "xray" && <Kbd className="ml-0.5 @max-[1500px]:hidden">X</Kbd>}
           </button>
         );
       })}

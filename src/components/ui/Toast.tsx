@@ -7,7 +7,8 @@
 import clsx from "clsx";
 import { CircleAlert, CircleCheck, Info, TriangleAlert, X, type LucideIcon } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { handOffFocus } from "./focus";
 import { KnotIcon } from "./KnotIcon";
 
 export type ToastTone = "neutral" | "ok" | "warn" | "error" | "knot";
@@ -104,7 +105,7 @@ export function ToastViewport({ className }: { className?: string }) {
       <ol aria-live="polite" aria-relevant="additions text" className="flex w-full flex-col items-center gap-2">
         <AnimatePresence initial={false}>
           {visible.map((t) => (
-            <ToastCard key={t.id} toast={t} onDismiss={() => api.dismiss(t.id)} />
+            <ToastCard key={t.id} toast={t} api={api} />
           ))}
         </AnimatePresence>
       </ol>
@@ -112,23 +113,30 @@ export function ToastViewport({ className }: { className?: string }) {
   );
 }
 
-function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => void }) {
+function ToastCard({ toast, api }: { toast: ToastItem; api: ToastApi }) {
   const reduce = useReducedMotion();
   const [paused, setPaused] = useState(false);
   const tone = toast.tone ?? "neutral";
   const duration = toast.durationMs ?? 5000;
   const Icon = toast.icon ?? TONE_ICON[tone];
   const color = TONE_COLOR[tone];
+  const ref = useRef<HTMLLIElement>(null);
+  const { id, rev } = toast;
+  const close = () => {
+    handOffFocus(ref.current);
+    api.dismiss(id);
+  };
 
   useEffect(() => {
     if (paused || duration <= 0) return;
-    const t = setTimeout(onDismiss, duration);
+    const t = setTimeout(() => api.dismiss(id), duration);
     return () => clearTimeout(t);
     // `rev` restarts the timer when the toast is replaced in place.
-  }, [paused, duration, onDismiss, toast.rev]);
+  }, [paused, duration, api, id, rev]);
 
   return (
     <motion.li
+      ref={ref}
       layout={!reduce}
       initial={reduce ? { opacity: 0 } : { opacity: 0, y: 14, scale: 0.97 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -153,7 +161,7 @@ function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => vo
           type="button"
           onClick={() => {
             toast.action?.onClick();
-            onDismiss();
+            close();
           }}
           className="shrink-0 rounded-[8px] px-2 py-1 text-[12px] font-semibold text-ink underline decoration-line-2 underline-offset-2 hover:bg-panel-2"
         >
@@ -162,7 +170,7 @@ function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => vo
       )}
       <button
         type="button"
-        onClick={onDismiss}
+        onClick={close}
         aria-label="Dismiss notification"
         title="Dismiss"
         className="grid size-6 shrink-0 place-items-center rounded-[7px] text-muted hover:bg-panel-2 hover:text-ink"
