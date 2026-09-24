@@ -2,7 +2,7 @@
 
 Weave is an **offline-first collaborative whiteboard that explains its own merges**.
 Every browser tab is an independent replica (a "user"). Tabs talk over
-`BroadcastChannel` (optionally upgraded to WebRTC DataChannels). There is **no server
+`BroadcastChannel`. There is **no server
 and no database**: the only source of truth is each replica's operation log, persisted
 to the tab's own `sessionStorage` so a reload keeps the tab's identity and history.
 
@@ -95,9 +95,15 @@ Payloads:
 | `shape.delete`  | `shapeId`                                                      |
 | `text.insert`   | `shapeId, after: CharId \| null, text` (chars chain after each other) |
 | `text.delete`   | `shapeId, chars: CharId[]`                                     |
-| `snapshot.mark` | `snapshotId, name, shapes: ShapeView[]` (visible state at mark time) |
+| `text.undelete` | `shapeId, chars: CharId[]` (re-show exact chars: undo, snapshot restore) |
+| `snapshot.mark` | `snapshotId, name, cut` (causal cut; state materialised on demand) |
 
-Ops are immutable once created and are JSON-serialisable.
+Ops are immutable once created and are JSON-serialisable. Every op is sanitised at creation
+(finite numbers, `-0 → 0`, coordinates rounded to 2 decimals, no `undefined` keys) and
+JSON-cloned before it is integrated locally, so BroadcastChannel (structured clone), JSON
+transports and `sessionStorage` all see byte-identical ops. Received ops are validated
+structurally and dropped if malformed. A local op's counter is always `vc[self] + 1` and its
+Lamport time `max(lamport, maxLamport) + 1`.
 
 ---
 
@@ -107,11 +113,13 @@ The document is a map `ShapeId → ShapeRecord`. The state is a pure function of
 *set* of integrated ops: integrating the same set in any causally-valid order yields a
 byte-identical `DocState` (checked by property tests and by the live state hash).
 
-### 3.1 Per-property LWW registers
-Each shape property (`x`, `y`, `w`, `h`, `points`, `stroke`, `fill`, `strokeWidth`,
-`opacity`, `fontSize`, `z`) is an independent last-writer-wins register stamped with
-`{opId, lamport, replica}`. A write replaces the register iff its stamp is greater in
-canonical order `(lamport, replica)`. Because canonical order extends causality, a
+### 3.1 LWW registers (coupled geometry is one register)
+Each shape has last-writer-wins registers stamped with `{opId, lamport, replica}`:
+`bounds` (`{x, y, w, h}` — coupled geometry, so a concurrent move and resize resolve
+atomically instead of producing a shape neither user made), `points`, `stroke`, `fill`,
+`strokeWidth`, `opacity`, `fontSize`, `z`. A write replaces the register iff its stamp is
+greater in canonical order `(lamport, replica, counter)`. `Tx.update` fills missing bounds
+fields from the current value and skips registers whose value would not change. Because canonical order extends causality, a
 causally-later write always wins; only **concurrent** writes are resolved by the
 tie-break — and those are the conflicts we surface.
 
@@ -119,7 +127,8 @@ Different properties merge independently: A recolours while B moves → both app
 
 ### 3.2 Deletion: observed-remove, update-wins
 A shape keeps two antichains (sets of maximal elements under happened-before):
-`writers` (create/update/text ops, each with its vc) and `deletes` (delete ops + vc).
+`writers` (create / update / text.insert / text.undelete — **not** text.delete, so a
+concurrent backspace can't resurrect a deleted note) and `deletes`.
 
 ```
 alive ⇔ ∃ w ∈ writers such that no d ∈ deletes has w.vc ≤ d.vc
@@ -141,26 +150,33 @@ Registers survive deletion (a resurrected shape keeps its latest values).
   visited in **descending** `(lamport, replica)` order (newer inserts sit closer to their
   anchor); document order = pre-order DFS from the virtual root (`after = null`).
   Chars of one op share the op's lamport; they never compete (each has a unique parent).
-- Delete: tombstone (`deleted = true`), idempotent. Inserting after a tombstone is legal.
-- Local editing diffs old vs new visible text (common prefix/suffix) into at most one
-  `text.delete` + one `text.insert` per keystroke.
+- Visibility is observed-remove, like shapes: each char has `shows` (its insert + any
+  `text.undelete`) and `hides` (`text.delete`) antichains; visible ⇔ some show was not
+  observed by any hide. Undo of a delete re-shows the *exact* chars (same ids, same place).
+  Inserting after a hidden char is legal.
+- Local editing derives edits from `beforeinput` (index-based `insertText` / `deleteText`);
+  a prefix/suffix diff (`setText`) is the fallback for IME composition and paste-replace.
 
 ### 3.4 Z-order
 `z` is an LWW register (float). "Bring to front" sets `z = max(z)+1`. Render order is
 `(z, shapeId)`.
 
-### 3.5 State-based merge
-`mergeDocs(a, b)` joins two `DocState`s: register-wise max stamp, antichain union of
-writers/deletes, RGA node union (tombstone = OR), vc = pointwise max. It is used when a
-peer is behind a compacted base (snapshot sync). Law (property-tested):
-`mergeDocs(state(S1), state(S2)) ≡ state(S1 ∪ S2)`.
+### 3.5 Determinism & the state hash
+`applyOp` is an idempotent, monotone join; ShapeRecords are immutable values (replaced, never
+mutated). `stateHash` = hash of the canonical JSON of every record (keys sorted, antichains
+sorted by op id, zero vc entries omitted) plus the vc and Lamport high-water mark
+(`DocState.maxLamport`). Equal vc + equal hash ⇒ converged; equal vc + different hash would
+mean an identity collision and is shown as an alarm. Property tests check that random
+multi-replica histories delivered in random causal orders (with duplicates) always produce
+the same hash, the same conflicts, and an incremental state equal to a replay from scratch.
 
 ---
 
 ## 4. Operation log & causal delivery
 
-`OpLog` stores every integrated op (deduplicated by `OpId`) with two views:
-arrival order (local integration order) and canonical order.
+`OpLog` stores every integrated op (deduplicated) in canonical order, indexed by shape and by
+replica. An op is already integrated ⇔ `op.counter ≤ vc[op.replica]` (checked before the log);
+a known id arriving with different content is reported as an identity collision.
 
 `CausalBuffer` holds received ops whose dependencies are missing. An op `o` from `r`
 is **ready** when `vc[r] === o.counter − 1` and `vc[k] ≥ o.vc[k]` for every `k ≠ r`.
@@ -194,14 +210,16 @@ text) from different replicas that are concurrent. Under update-wins the edit pr
 every delete.
 
 ### 5.3 `concurrent-text`
-For one text shape: build a graph whose nodes are text ops and whose edges join
-concurrent text ops from different replicas. Each connected component containing ≥2
-replicas is one conflict (`ops` = all ops of the component). The explainer shows the
-merged string coloured by author and, for every pair that inserted after the same
-anchor, which went first and why.
+Per anchor: two concurrent `text.insert` ops from different replicas that inserted right
+after the same char (mutually maximal per replica pair). Only their relative order was
+decided (newer first); both texts are kept. Typing elsewhere in the note is not a conflict.
 
-Conflict ids are deterministic: `${kind}:${shapeId}:${sorted op ids joined by '|'}`
-(for `concurrent-text`, the canonically-smallest op id of the component).
+Conflict ids are deterministic: `${kind}:${shapeId}:${opA}|${opB}` (text adds the anchor).
+Because mutual maximality depends on which ops have arrived, an id can be *replaced* under
+partial delivery (A's older op is superseded by A's newer one); `lineageKey`
+(`kind:shape:replica pair:register|anchor`) is stable across that, and the UI re-resolves a
+focused conflict by lineage. Conflicts also carry `txns` (to group "A's Move 10 shapes vs
+B's Recolour 10 shapes" into one card), `valuesEqual` (benign) and `resolvedBy`.
 
 ---
 
@@ -219,9 +237,9 @@ assembled in components beyond formatting):
    For delete-vs-edit: (1) did the delete observe the edit? (2) policy update-wins.
    For text: per-anchor sibling ordering rule.
 5. `outcome` — winner, resulting value(s), what was discarded.
-6. `convergence` — the engine actually re-materialises the affected shape with the two
-   ops applied in both orders (A→B and B→A) on top of their common causal past and
-   reports both hashes + `equal`.
+6. `convergence` — the engine actually re-materialises the affected shape from
+   `(↓a ∪ ↓b) \ {a, b}` (both causal pasts, so every anchor/create exists) and then applies
+   the two ops in both orders, reporting both hashes + `equal`.
 7. `counterfactuals` — wall-clock order ("would have picked B"), delete-wins policy,
    "if B had synced first" (same result: order-independence), etc.
 8. `causalPast` — op ids in each side's causal past, for highlighting in the space-time
@@ -232,36 +250,35 @@ assembled in components beyond formatting):
 ## 7. Undo / redo (local, selective, compensating)
 
 Undo never removes ops from the log; it emits **new** compensating ops (cause `undo`/`redo`)
-in a new txn, so it merges like any other edit.
-- The `UndoManager` records, for every local user txn, each op plus the values it
-  overwrote (`prev`) captured at creation time.
-- Undo of `shape.update` restores `prev[p]` for each prop `p` **only if the register's
-  current winner was written by this replica**; if another replica wrote it since, `p` is
-  skipped and reported ("Undo skipped fill — B changed it after you").
-- Undo of `shape.create` → `shape.delete`. Undo of `shape.delete` → `shape.update {}`.
-- Undo of `text.insert` → `text.delete` of those chars still visible. Undo of
-  `text.delete` → `text.insert` of the same string anchored after the **last deleted
-  char** (tombstone), which places it exactly where it was.
-- Redo = undo of the undo txn. Any new user txn clears the redo stack.
-- Remote ops never enter the local stacks.
+in a new txn, so it merges like any other edit. Entries record *semantic inverses*:
+`props` (register, op id, value, prev), `kill`, `revive`, `text-hide`, `text-show`.
+- Register restore is keyed on **op identity**: restore only if the op being undone still
+  holds the register; the restored value is what the register would hold *without that op*
+  (max-stamp write among the other ops). So a later or concurrent edit by someone else is
+  never clobbered; it is skipped and reported ("skipped colour — B changed it after you").
+- `kill` ⇄ `revive` (`shape.delete` ⇄ `shape.update {}`), `text-hide` ⇄ `text-show`
+  (`text.delete` ⇄ `text.undelete` of the exact chars; chars someone else also deleted are
+  skipped). Redo applies the recorded inverse of the inverse.
+- Any new user txn clears the redo stack. Remote ops never enter the local stacks. A fork
+  (duplicate tab) clears the stacks.
 
 ---
 
-## 8. Snapshots, checkpoints, compaction, time travel
+## 8. Snapshots, checkpoints, stability, time travel
 
-- **Named snapshots** are ops (`snapshot.mark`) so every tab sees them. The payload holds
-  the visible `ShapeView[]` at mark time, making preview/restore self-contained.
-  *Restore* diffs current vs snapshot and emits one txn of ordinary ops (undoable,
-  mergeable with concurrent edits).
+- **Named snapshots** are ops (`snapshot.mark`) so every tab sees them. The payload is a
+  causal cut (a vector clock, a few bytes); the state at that cut is materialised on
+  demand. *Restore* diffs current vs snapshot state and emits one txn of ordinary ops —
+  register writes, revives, deletes, and `text.delete`/`text.undelete` of exact chars —
+  undoable and mergeable with concurrent edits.
 - **Checkpoints** (internal): cached `DocState` every N ops of canonical order for fast
   time-travel; invalidated when an op lands before them (merges weave history).
-- **Time travel**: the history ribbon scrubs the canonical order; every prefix is a
-  consistent cut. The canvas becomes read-only while scrubbing.
-- **Causal stability**: an op is *stable* when every known peer's vc covers it.
-  The log view shades stable ops. `compact()` folds stable ops into `base: DocState` and
-  drops them from the log (conflicts over compacted ops are marked "compacted").
-  A peer whose vc does not cover `baseVc` is sent a `snapshot` message (full `DocState`)
-  and merges it with `mergeDocs`.
+- **Time travel**: scrubbing is anchored to an op id (the canonical prefix ending at it) so
+  the frame doesn't jump when merges insert older ops; snapshot previews use causal cuts.
+  Every prefix is a consistent cut. The canvas is read-only while scrubbing.
+- **Causal stability**: an op is *stable* when every known replica's last vc covers it
+  (shaded in the loom). Log compaction is intentionally not implemented: it would destroy
+  the history that explanations are built from, and demo-scale logs are small.
 
 ---
 
@@ -274,34 +291,41 @@ Channel name: `weave:${room}` (room from `?room=`, default `lobby`).
 | `hello`      | on start and on every reconnect; carries vc, label, stateHash, instance nonce |
 | `ops`        | live broadcast of new local ops; or targeted catch-up (`to`) |
 | `sync-req`   | "send me what I lack" — carries requester vc |
-| `snapshot`   | full DocState for a peer behind our compacted base |
-| `heartbeat`  | every ~1.5 s: vc + stateHash (anti-entropy, stability, convergence badge) |
+| `heartbeat`  | every ~1.5 s: vc + stateHash + visibility (anti-entropy, stability, convergence badge) |
 | `presence`   | cursor, in-progress stroke, drag preview, selection, editing target (~30 Hz, never logged) |
 | `bye`        | tab closing |
 | `rtc-*`      | WebRTC signalling (offer/answer/ice) when the WebRTC upgrade is on |
 
 Anti-entropy: on any `hello`/`heartbeat`, if the peer lacks ops we have → send them
-(targeted); if the peer has ops we lack → `sync-req`. Ops stuck in the causal buffer for
->2 s trigger a `sync-req`. This repairs drops, reordering, and offline gaps with one
-mechanism.
+(targeted, chunked), suppressing repeat pushes while an earlier one is still in flight. Ops
+stuck in the causal buffer for >2 s trigger a `sync-req`. This repairs drops, reordering,
+duplicates and offline gaps with one mechanism. Hidden tabs (throttled timers) report
+`visible: false` and show as *idle*, not gone; a tab that becomes visible re-syncs.
 
 **Offline** is a local switch in the network simulator: all traffic in and out is dropped
 (not queued — the log *is* the queue). Going online sends `hello`; both sides exchange
-what the other lacks; the session emits a **MergeReport** (ops received, new conflicts,
-resurrections) that drives the reconnect animation.
+what the other lacks. A **merge window** opens on reconnect (or when a peer returns) and
+closes when clocks match; it emits one **MergeReport** per side (ops received, own ops
+delivered, before/after of changed shapes, new conflicts, resurrections) that drives the
+reconnect choreography in both tabs.
 
 **Network chaos** (simulator): latency, jitter, drop rate, duplicate rate — to show the
 causal buffer and anti-entropy converge anyway.
 
-**WebRTC upgrade**: BroadcastChannel is always used for discovery/signalling. If both
-sides enable WebRTC, they negotiate an `RTCDataChannel` ("perfect negotiation"; the
-replica with the smaller id is polite) and route that link's traffic over it; otherwise
-fall back to BroadcastChannel. Each peer row shows its link transport.
+**Transport**: BroadcastChannel (same-origin tabs, and the two in-process panes of
+`/split`). The protocol reserves `rtc-signal` for a WebRTC DataChannel upgrade, but it is not
+enabled in this build.
 
-**Duplicate tabs**: "Duplicate tab" copies `sessionStorage`, cloning a replica id. Each
-tab instance has a random nonce; if a `hello` arrives with our replica id and a
-different nonce, the instance with the greater nonce forks: new replica id, same log.
-The old id is never used to author ops again by the forked tab.
+**Identity**: before a session becomes `ready`, it takes a Web Locks lease
+`weave:rid:<replicaId>` for its lifetime. "Duplicate tab" / `window.open` clones copy
+`sessionStorage` (and so the replica id); the clone can't get the lease and forks — new
+replica id and label, same log, cleared undo stacks — before authoring anything. Without
+Web Locks, a per-instance nonce on every message is the fallback. Local ops are persisted
+synchronously *before* they are broadcast (write-ahead), so a reload can never re-author an
+op id with different content. Sessions live in a `globalThis` registry with refcounts, so
+React StrictMode double-mounts and Fast Refresh never create two live sessions for one
+(room, pane). Storage is namespaced per pane (`weave:v2:<room>:<pane>`), so the two panes of
+`/split` (one document, one sessionStorage) never share state.
 
 **Convergence badge**: each heartbeat carries `stateHash` (hash of canonical DocState).
 When our vc equals a peer's vc and hashes match → "Converged with B".
@@ -327,5 +351,6 @@ When our vc equals a peer's vc and hashes match → "Converged with B".
   snapshots as flags, offline stretches hatched; scrub = time travel.
 - Reconnect → **Merge report** card: "Merged 9 ops from B · 2 conflicts · 1 resurrection
   → Explain".
-- `/split`: two iframes (Tab A | Tab B) in one window on a fresh room, plus a scenario
-  director that scripts classic conflicts.
+- `/split`: two independent sessions (Tab A | Tab B) in one window on a fresh room, with a
+  director's "seam" between them: live divergence counters, scripted scenarios, a guided
+  tour, and the shared explainer.

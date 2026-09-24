@@ -3,7 +3,7 @@
  * React bindings for a WhiteboardSession. Sessions are provided through context (never a
  * module singleton) so /split can render two independent panes in one document.
  */
-import { createContext, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { ReplicaId, ReplicaView } from "../crdt/types";
 import type { PresenceState } from "../sync/protocol";
 import type { SessionEvent, SessionOptions, SessionState, WhiteboardSessionApi } from "./types";
@@ -28,12 +28,15 @@ export function useSession(): WhiteboardSessionApi {
 export function useAcquiredSession(opts: SessionOptions | null): WhiteboardSessionApi | null {
   const [session, setSession] = useState<WhiteboardSessionApi | null>(null);
   const key = opts ? `${opts.room}:${opts.pane ?? "main"}` : null;
-  const optsRef = useRef(opts);
-  optsRef.current = opts;
+  const currentOpts = useEffectEvent(() => opts);
   useEffect(() => {
-    const o = optsRef.current;
+    if (!key) return;
+    const o = currentOpts();
     if (!o) return;
     const s = acquireSession(o);
+    // Acquiring an external, refcounted resource: the effect is the right place, and the
+    // single extra render when it resolves is intended.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSession(s);
     return () => {
       releaseSession(s);
@@ -89,7 +92,6 @@ export function usePresence(): ReadonlyMap<ReplicaId, PresenceState> {
 
 export function useSessionEvent(handler: (e: SessionEvent) => void): void {
   const session = useSession();
-  const ref = useRef(handler);
-  ref.current = handler;
-  useEffect(() => session.onEvent((e) => ref.current(e)), [session]);
+  const onEvent = useEffectEvent(handler);
+  useEffect(() => session.onEvent((e) => onEvent(e)), [session]);
 }

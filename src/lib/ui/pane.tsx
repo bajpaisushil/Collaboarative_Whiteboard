@@ -4,7 +4,7 @@
  * are bound to the pane root element (focus-within), never to window, so split panes don't
  * both react to one keypress.
  */
-import { createContext, useContext, useEffect, useRef, type ReactNode, type RefObject } from "react";
+import { createContext, useContext, useEffect, useEffectEvent, type ReactNode, type RefObject } from "react";
 
 export interface PaneContextValue {
   paneId: string;
@@ -37,14 +37,13 @@ export function isTypingTarget(t: EventTarget | null): boolean {
  */
 export function usePaneKeydown(handler: (e: KeyboardEvent) => boolean | void): void {
   const { rootRef } = usePane();
-  const ref = useRef(handler);
-  ref.current = handler;
+  const onKey = useEffectEvent(handler);
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
     const listener = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
-      if (ref.current(e) === true) {
+      if (onKey(e) === true) {
         e.preventDefault();
         e.stopPropagation();
       }
