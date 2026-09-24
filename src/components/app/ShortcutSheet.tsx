@@ -71,6 +71,7 @@ const GROUPS: readonly Group[] = [
     items: [
       { keys: [["\\"], ["mod", "shift", "O"]], what: "Unplug / plug in this tab", note: "Edits keep working and merge on reconnect" },
       { keys: [["W"], ["Right-click"]], what: "Why does this shape look like this?", note: "With a shape selected (or under the pointer)" },
+      { keys: [["left"], ["right"]], what: "Step through history", note: "While time-travelling (drag the loom to start); Shift steps 10" },
       { keys: one("esc"), what: "Leave time travel · close the explanation" },
       { keys: one("?"), what: "This sheet" },
     ],

@@ -686,7 +686,9 @@ export class Replica implements ReplicaApi {
     if (c.kind === "delete-vs-edit") {
       return op.kind === "shape.delete" ? { shape: null, props: [] } : { shape: { ...view, alive: true }, props: [] };
     }
-    return { shape: view, props: [] };
+    // Text: that side's version is the note as its author saw it right after typing.
+    const seen = this.docAtCut(op.vc).shapes[c.shapeId];
+    return { shape: seen ? { ...shapeView(seen), alive: true } : view, props: [] };
   }
 
   private materializePrefix(count: number): DocState {

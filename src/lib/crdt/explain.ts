@@ -7,7 +7,7 @@ import { colorName, describeOp, describeProps, propsNoun, shapeNoun } from "./de
 import { applyOp, createDoc, flatProps, hashRecord, isAlive, propsOfRegister, registerValuesOf, registersWritten, compareStamps } from "./document";
 import type { OpLog } from "./oplog";
 import { compareOps } from "./oplog";
-import { compareSiblings, rgaLayout, rgaRuns } from "./rga";
+import { compareSiblings, isCharVisible, rgaLayout, rgaRuns } from "./rga";
 import type {
   Conflict,
   Counterfactual,
@@ -348,8 +348,10 @@ function explainDelete(conflict: Conflict, ctx: ExplainContext, rec: ShapeRecord
   ];
   return {
     conflict,
-    question: `Why is this ${noun} still here? ${ld} deleted it.`,
-    answer: `${le} edited the ${noun} while ${ld}'s delete was happening elsewhere — ${ld} never saw that edit. Weave only removes what the deleter had seen, so ${le}'s edit keeps the ${noun} alive ("update wins").`,
+    question: alive ? `Why is this ${noun} still here? ${ld} deleted it.` : `Why didn't ${ld}'s delete remove this ${noun} at first?`,
+    answer: alive
+      ? `${le} edited the ${noun} while ${ld}'s delete was happening elsewhere — ${ld} never saw that edit. Weave only removes what the deleter had seen, so ${le}'s edit keeps the ${noun} alive ("update wins").`
+      : `${le} edited the ${noun} while ${ld}'s delete was happening elsewhere, so the edit kept it alive ("update wins"). Later, someone who had seen ${le}'s edit deleted it again — so now it's gone.`,
     baseCut,
     sides: [sE, sD],
     vcProof: buildVcProof(edit, del, ctx.labelOf),
@@ -358,10 +360,45 @@ function explainDelete(conflict: Conflict, ctx: ExplainContext, rec: ShapeRecord
     convergence: cvg,
     counterfactuals: cfs,
     causalPast: causalPast(ctx, [edit, del]),
+    supersededBy:
+      conflict.status === "superseded" && conflict.resolvedBy
+        ? { opId: conflict.resolvedBy.opId, label: ctx.labelOf(conflict.resolvedBy.opId.slice(0, conflict.resolvedBy.opId.lastIndexOf(":"))) }
+        : undefined,
   };
 }
 
 /* ------------------------------------------------------------ concurrent-text */
+
+/** Visible text with the subtrees of two sibling inserts swapped (the reversed-rule what-if). */
+function swappedText(state: NonNullable<ShapeRecord["text"]>, opA: OpId, opB: OpId): string | null {
+  const layout = rgaLayout(state);
+  const range = (opId: OpId): [number, number] | null => {
+    const root = `${opId}.0`;
+    const start = layout.index.get(root);
+    if (start === undefined) return null;
+    let size = 0;
+    const stack = [root];
+    while (stack.length) {
+      const id = stack.pop()!;
+      size++;
+      for (const k of layout.children.get(id) ?? []) stack.push(k.id);
+    }
+    return [start, start + size];
+  };
+  const ra = range(opA),
+    rb = range(opB);
+  if (!ra || !rb) return null;
+  const [first, second] = ra[0] < rb[0] ? [ra, rb] : [rb, ra];
+  const vis = (from: number, to: number) =>
+    layout.order
+      .slice(from, to)
+      .filter((n) => isCharVisible(n))
+      .map((n) => n.ch)
+      .join("");
+  return (
+    vis(0, first[0]) + vis(second[0], second[1]) + vis(first[1], second[0]) + vis(first[0], first[1]) + vis(second[1], layout.order.length)
+  );
+}
 
 function explainText(conflict: Conflict, ctx: ExplainContext, rec: ShapeRecord): Explanation | null {
   const first = ctx.log.get(conflict.ops[0]);
@@ -446,7 +483,7 @@ function explainText(conflict: Conflict, ctx: ExplainContext, rec: ShapeRecord):
         title: "If the order rule were reversed",
         detail: `${l2}'s “${t2}” would come first. Either rule works as long as every tab uses the same one.`,
         differs: true,
-        result: null,
+        result: { text: swappedText(rec.text, first.id, second.id) ?? undefined },
       },
       {
         id: "other-order",

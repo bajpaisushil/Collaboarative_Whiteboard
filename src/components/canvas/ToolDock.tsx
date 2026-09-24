@@ -86,8 +86,9 @@ function initialStyleOpen(orientation: DockOrientation): boolean {
   } catch {
     /* storage blocked: fall through to the default */
   }
-  // Roomy desktop board: show the palette; compact / short screens start tidy.
-  return orientation === "vertical" && window.innerWidth >= 1024 && window.innerHeight >= 720;
+  // Start tidy: the colour chip opens the palette, and the choice is remembered.
+  void orientation;
+  return false;
 }
 
 function Dock({ orientation }: { orientation: DockOrientation }) {

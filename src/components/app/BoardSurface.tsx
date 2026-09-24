@@ -37,6 +37,7 @@ import { ShortcutSheet } from "./ShortcutSheet";
 import { applyStoredTheme } from "./theme";
 import { TOPBAR_HEIGHT, TOPBAR_HEIGHT_COMPACT, TopBar } from "./topbar/TopBar";
 import { WhyDrawer } from "./WhyDrawer";
+import { WhyDeepLink } from "@/components/why/WhyDeepLink";
 
 export interface BoardSurfaceProps {
   session: WhiteboardSessionApi;
@@ -146,6 +147,7 @@ function BoardLayout({ rootRef, compact, paneId }: { rootRef: RefObject<HTMLDivE
         </div>
 
         {!compact && <WhyDrawer />}
+        {!compact && <WhyDeepLink />}
         {!compact && <Coach />}
 
         <ClearOfSheet className="pointer-events-none absolute bottom-4 left-0 z-30 px-4">
