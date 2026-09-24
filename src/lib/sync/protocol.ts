@@ -1,6 +1,7 @@
 /**
- * Wire protocol between replicas (BroadcastChannel or WebRTC DataChannel).
- * See docs/ARCHITECTURE.md §9. All messages are structured-clone / JSON safe.
+ * Wire protocol between replicas: BroadcastChannel between tabs on one computer, WebRTC
+ * DataChannels between computers (paired with copy-paste codes, see rtc.ts). The same messages
+ * travel on both. See docs/ARCHITECTURE.md §9. All messages are structured-clone / JSON safe.
  */
 import type { Op, Point, ReplicaId, ShapeId, ShapeProps, ShapeType, VectorClock } from "../crdt/types";
 
@@ -24,6 +25,7 @@ export interface HelloMsg extends Envelope {
   stateHash: string;
   /** Ask peers to answer with their own hello (true on start / reconnect / tab visible). */
   wantReply: boolean;
+  /** This tab can pair with other computers over WebRTC. */
   rtc: boolean;
   visible: boolean;
 }
@@ -82,29 +84,22 @@ export interface ByeMsg extends Envelope {
   t: "bye";
 }
 
-export interface RtcSignalMsg extends Envelope {
-  t: "rtc-signal";
-  to: ReplicaId;
-  description?: RTCSessionDescriptionInit;
-  candidate?: RTCIceCandidateInit | null;
-}
-
 export type SyncMessage =
   | HelloMsg
   | OpsMsg
   | SyncReqMsg
   | HeartbeatMsg
   | PresenceMsg
-  | ByeMsg
-  | RtcSignalMsg;
+  | ByeMsg;
 
 export type SyncMessageType = SyncMessage["t"];
 
-/** Minimal transport surface. Implementations: BroadcastTransport, MemoryTransport, RtcMesh. */
+/** Minimal transport surface. Implementations: BroadcastTransport, MemoryTransport, LinkRouter. */
 export interface Transport {
   readonly kind: LinkTransport | "memory";
   send(msg: SyncMessage): void;
-  onMessage(handler: (msg: SyncMessage) => void): () => void;
+  /** `via` = which kind of link delivered the message (for per-peer transport badges). */
+  onMessage(handler: (msg: SyncMessage, via?: LinkTransport) => void): () => void;
   close(): void;
 }
 

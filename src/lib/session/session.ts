@@ -21,12 +21,16 @@ import {
   type Transport,
 } from "../sync/protocol";
 import { BroadcastTransport } from "../sync/transport";
+import { LinkRouter } from "../sync/router";
+import { RtcLink, rtcAvailable, type RtcOptions } from "../sync/rtc";
+import { decodePairing, PairingCodeError } from "../sync/rtc-codec";
 import { threadColor } from "../ui/colors";
 import { Persistence, safeSessionStorage, storageKey } from "./persistence";
 import type {
   MergeReport,
   PeerInfo,
   PeerStatus,
+  RtcLinkInfo,
   SessionEvent,
   SessionOptions,
   SessionState,
@@ -115,6 +119,9 @@ export class WhiteboardSession implements WhiteboardSessionApi {
   private readonly persistence: Persistence;
 
   private net: NetworkSim | null = null;
+  private router: LinkRouter | null = null;
+  private links = new Map<string, RtcLink>();
+  private linkWasUp = new Set<string>();
   private started = false;
   private disposed = false;
   private ready = false;
@@ -185,7 +192,9 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     if (this.started || this.disposed) return;
     this.started = true;
     const transport: Transport = this.opts.transport ?? new BroadcastTransport(`weave:${this.room}`);
-    this.net = new NetworkSim(transport, { conditions: this.conditions, timers: this.timers, random: this.random });
+    this.router = new LinkRouter(transport);
+    // The cable switch and chaos sit in front of *every* path, WebRTC included.
+    this.net = new NetworkSim(this.router, { conditions: this.conditions, timers: this.timers, random: this.random });
     this.net.onMessage((m) => this.handle(m));
     this.unsubReplica = this.replica.subscribe(() => {
       this.scheduleSave();
@@ -349,7 +358,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
         lastSeen: p.lastSeen,
         vc: p.vc,
         stateHash: p.stateHash,
-        transport: "broadcast",
+        transport: this.router?.rtcPeers().has(p.replica) ? "webrtc" : "broadcast",
         converged,
         diverged: vcEquals(p.vc, view.vc) && p.stateHash !== view.stateHash,
         unseenByPeer: Math.max(0, vcGet(view.vc, self) - vcGet(p.vc, self)),
@@ -379,7 +388,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       color: threadColor(this.replica.label),
       forkedFrom: this.forkedFrom,
       network: this.conditions,
-      rtcEnabled: false,
+      rtc: { available: this.rtcSupported(), links: [...this.links.values()].map(linkInfo) },
       peers: this.peerInfos(),
       offlineSince: this.offlineSince,
       unsyncedLocalOps: known.length ? Math.max(0, mine - minSeen) : this.offlineSince ? this.localOpsSince(this.offlineSince) : 0,
@@ -436,8 +445,96 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     this.touch();
   }
 
-  setRtcEnabled(enabled: boolean): void {
-    if (enabled) this.emit({ type: "info", message: "WebRTC upgrade isn't available in this build — tabs stay on BroadcastChannel." });
+  /* ================================================================ WebRTC pairing */
+
+  private rtcSupported(): boolean {
+    return rtcAvailable(this.opts.RTCPeerConnection);
+  }
+
+  private rtcOptions(): RtcOptions {
+    return { iceServers: this.opts.iceServers, RTCPeerConnection: this.opts.RTCPeerConnection };
+  }
+
+  private me() {
+    return { room: this.room, replica: this.replica.id, label: this.replica.label };
+  }
+
+  private registerLink(link: RtcLink): RtcLinkInfo {
+    this.links.set(link.pid, link);
+    this.router?.addLink(link);
+    link.onState((l) => this.onLinkState(l));
+    this.touch();
+    return linkInfo(link);
+  }
+
+  private onLinkState(link: RtcLink): void {
+    if (this.disposed) return;
+    if (link.state === "connected") {
+      const first = !this.linkWasUp.has(link.pid);
+      this.linkWasUp.add(link.pid);
+      // Introduce ourselves over the new path; anti-entropy takes it from there.
+      this.sendHello(true);
+      if (first) this.emit({ type: "link", link: linkInfo(link), change: "connected" });
+    } else if (link.state === "failed") {
+      this.router?.removeLink(link.pid);
+      this.emit({ type: "link", link: linkInfo(link), change: "failed" });
+    } else if (link.state === "closed") {
+      this.router?.removeLink(link.pid);
+      if (this.linkWasUp.has(link.pid)) this.emit({ type: "link", link: linkInfo(link), change: "lost" });
+    }
+    this.touch();
+  }
+
+  private requireRtc(): void {
+    if (this.disposed || !this.started) throw new PairingCodeError("This board isn't running.");
+    if (!this.ready) throw new PairingCodeError("Still starting up — try again in a moment.");
+    if (!this.rtcSupported()) throw new PairingCodeError("This browser doesn't support WebRTC.");
+  }
+
+  async createInvite(): Promise<RtcLinkInfo> {
+    this.requireRtc();
+    const link = await RtcLink.invite(this.me(), this.rtcOptions());
+    if (this.disposed) {
+      link.close();
+      throw new PairingCodeError("This board was closed.");
+    }
+    return this.registerLink(link);
+  }
+
+  async acceptInvite(text: string): Promise<RtcLinkInfo> {
+    this.requireRtc();
+    const offer = await decodePairing(text);
+    if (offer.k !== "offer") throw new PairingCodeError("That's a reply code. Paste it into the computer that made the invite.");
+    if (offer.from === this.replica.id) throw new PairingCodeError("That's this tab's own invite — open it on the other computer.");
+    if (offer.room !== this.room) throw new RoomMismatchError(offer.room);
+    const existing = this.links.get(offer.pid);
+    if (existing) return linkInfo(existing);
+    const link = await RtcLink.accept(offer, this.me(), this.rtcOptions());
+    if (this.disposed) {
+      link.close();
+      throw new PairingCodeError("This board was closed.");
+    }
+    return this.registerLink(link);
+  }
+
+  async completeInvite(text: string): Promise<RtcLinkInfo> {
+    this.requireRtc();
+    const answer = await decodePairing(text);
+    if (answer.k !== "answer") throw new PairingCodeError("That's an invite, not a reply. Paste the reply code the other computer showed you.");
+    const link = this.links.get(answer.pid);
+    if (!link || link.role !== "inviter") throw new PairingCodeError("No open invite in this tab matches that reply. Was it made in another tab?");
+    await link.complete(text);
+    this.touch();
+    return linkInfo(link);
+  }
+
+  closeLink(pid: string): void {
+    const link = this.links.get(pid);
+    if (!link) return;
+    this.links.delete(pid);
+    this.router?.removeLink(pid);
+    link.close();
+    this.touch();
   }
 
   syncNow(): void {
@@ -508,14 +605,14 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       vc: view.vc,
       stateHash: view.stateHash,
       wantReply,
-      rtc: false,
+      rtc: this.rtcSupported(),
       visible: this.visible(),
     });
   }
 
   private sendHeartbeat(): void {
     const view = this.replica.getView();
-    this.send({ ...this.envelope(), t: "heartbeat", label: this.replica.label, vc: view.vc, stateHash: view.stateHash, rtc: false, visible: this.visible() });
+    this.send({ ...this.envelope(), t: "heartbeat", label: this.replica.label, vc: view.vc, stateHash: view.stateHash, rtc: this.rtcSupported(), visible: this.visible() });
   }
 
   /** Send a peer the ops it lacks (suppressing duplicate pushes while earlier ones are in flight). */
@@ -638,8 +735,6 @@ export class WhiteboardSession implements WhiteboardSessionApi {
         }
         break;
       }
-      case "rtc-signal":
-        break;
     }
     this.touch();
   }
@@ -933,6 +1028,26 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     const room = `r-${randomId(this.random, 6).slice(1)}`;
     return room;
   }
+}
+
+/** An invite for a different board: the UI offers to switch to it. */
+export class RoomMismatchError extends PairingCodeError {
+  constructor(readonly room: string) {
+    super(`This invite is for another board (“${room}”). Open the invite link to join it.`);
+  }
+}
+
+function linkInfo(l: RtcLink): RtcLinkInfo {
+  return {
+    pid: l.pid,
+    role: l.role,
+    state: l.state,
+    code: l.code,
+    remoteReplica: l.remoteReplica,
+    remoteLabel: l.remoteLabel,
+    error: l.error,
+    createdAt: l.createdAt,
+  };
 }
 
 export function createSession(opts: SessionOptions): WhiteboardSessionApi {

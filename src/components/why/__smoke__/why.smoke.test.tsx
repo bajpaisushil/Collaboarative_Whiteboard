@@ -42,7 +42,7 @@ function fakeSession(r: Replica): WhiteboardSessionApi {
     color: "var(--thread-a)",
     forkedFrom: null,
     network: DEFAULT_CONDITIONS,
-    rtcEnabled: false,
+    rtc: { available: false, links: [] },
     peers: [],
     offlineSince: null,
     unsyncedLocalOps: 0,

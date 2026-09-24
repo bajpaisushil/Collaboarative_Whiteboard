@@ -19,7 +19,6 @@ export const selectOnline = (s: SessionState) => s.network.online;
 export const selectNetwork = (s: SessionState) => s.network;
 export const selectUnsynced = (s: SessionState) => s.unsyncedLocalOps;
 export const selectOfflineSince = (s: SessionState) => s.offlineSince;
-export const selectRtcEnabled = (s: SessionState) => s.rtcEnabled;
 export const selectTraffic = (s: SessionState) => s.traffic;
 export const selectReady = (s: SessionState) => s.ready;
 export const selectHasLivePeer = (s: SessionState) => s.peers.some(isLivePeer);

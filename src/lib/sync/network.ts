@@ -3,7 +3,7 @@
  * (latency, jitter → reordering, drops, duplicates). Offline drops traffic both ways — it is
  * not queued: the op log *is* the queue, and anti-entropy catches up on reconnect.
  */
-import type { NetworkConditions, SyncMessage, Transport } from "./protocol";
+import type { LinkTransport, NetworkConditions, SyncMessage, Transport } from "./protocol";
 import { DEFAULT_CONDITIONS } from "./protocol";
 
 export interface SimTimers {
@@ -20,7 +20,7 @@ export interface TrafficCounters {
 export class NetworkSim implements Transport {
   readonly kind: Transport["kind"];
   private conditions: NetworkConditions;
-  private handlers = new Set<(msg: SyncMessage) => void>();
+  private handlers = new Set<(msg: SyncMessage, via?: LinkTransport) => void>();
   private unsub: () => void;
   private timers: SimTimers;
   private random: () => number;
@@ -35,7 +35,7 @@ export class NetworkSim implements Transport {
     this.conditions = { ...DEFAULT_CONDITIONS, ...opts.conditions };
     this.timers = opts.timers ?? { setTimeout: (f, ms) => setTimeout(f, ms), clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>) };
     this.random = opts.random ?? Math.random;
-    this.unsub = inner.onMessage((m) => this.onIncoming(m));
+    this.unsub = inner.onMessage((m, via) => this.onIncoming(m, via));
   }
 
   getConditions(): NetworkConditions {
@@ -55,13 +55,13 @@ export class NetworkSim implements Transport {
     return this.conditions.online;
   }
 
-  private onIncoming(msg: SyncMessage): void {
+  private onIncoming(msg: SyncMessage, via?: LinkTransport): void {
     if (!this.conditions.online) {
       this.traffic.dropped++;
       return;
     }
     this.traffic.received++;
-    for (const h of [...this.handlers]) h(msg);
+    for (const h of [...this.handlers]) h(msg, via);
   }
 
   private later(fn: () => void, ms: number): void {
@@ -78,13 +78,11 @@ export class NetworkSim implements Transport {
       this.traffic.dropped++;
       return;
     }
-    // Signalling is exempt from chaos so the WebRTC upgrade can be demonstrated under it.
-    const chaos = msg.t !== "rtc-signal";
-    if (chaos && c.dropRate > 0 && this.random() < c.dropRate) {
+    if (c.dropRate > 0 && this.random() < c.dropRate) {
       this.traffic.dropped++;
       return;
     }
-    const delay = () => (chaos ? c.latencyMs + (c.jitterMs > 0 ? this.random() * c.jitterMs : 0) : 0);
+    const delay = () => c.latencyMs + (c.jitterMs > 0 ? this.random() * c.jitterMs : 0);
     const deliver = () => {
       if (!this.conditions.online) {
         this.traffic.dropped++;
@@ -96,10 +94,10 @@ export class NetworkSim implements Transport {
     const d = delay();
     if (d <= 0) deliver();
     else this.later(deliver, d);
-    if (chaos && c.duplicateRate > 0 && this.random() < c.duplicateRate) this.later(deliver, delay() + 5);
+    if (c.duplicateRate > 0 && this.random() < c.duplicateRate) this.later(deliver, delay() + 5);
   }
 
-  onMessage(handler: (msg: SyncMessage) => void): () => void {
+  onMessage(handler: (msg: SyncMessage, via?: LinkTransport) => void): () => void {
     this.handlers.add(handler);
     return () => this.handlers.delete(handler);
   }

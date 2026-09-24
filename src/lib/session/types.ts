@@ -18,6 +18,20 @@ import type {
 } from "../crdt/types";
 import type { LinkTransport, NetworkConditions, PresenceState, Transport } from "../sync/protocol";
 
+/** A WebRTC link to another computer (paired with copy-paste codes, no server). */
+export interface RtcLinkInfo {
+  /** Pairing id (shared by both sides of one link). */
+  pid: string;
+  role: "inviter" | "invitee";
+  state: "gathering" | "waiting-answer" | "connecting" | "connected" | "disconnected" | "failed" | "closed";
+  /** The code this side must hand over: the invite (inviter) or the reply (invitee). */
+  code: string | null;
+  remoteReplica: ReplicaId | null;
+  remoteLabel: string | null;
+  error: string | null;
+  createdAt: number;
+}
+
 /** online = heard recently; idle = tab hidden (throttled); unreachable = silent, no bye; left = said bye. */
 export type PeerStatus = "online" | "idle" | "unreachable" | "left";
 
@@ -71,6 +85,7 @@ export type SessionEvent =
   | { type: "peer-joined"; replica: ReplicaId }
   | { type: "peer-left"; replica: ReplicaId }
   | { type: "storage-error"; message: string }
+  | { type: "link"; link: RtcLinkInfo; change: "connected" | "lost" | "failed" }
   | { type: "info"; message: string };
 
 export interface SessionState {
@@ -83,7 +98,8 @@ export interface SessionState {
   color: string;
   forkedFrom: ReplicaId | null;
   network: NetworkConditions;
-  rtcEnabled: boolean;
+  /** WebRTC links to other computers. `available` = this browser supports RTCPeerConnection. */
+  rtc: { available: boolean; links: RtcLinkInfo[] };
   peers: PeerInfo[];
   /** Wall time we went offline, or null. */
   offlineSince: number | null;
@@ -107,7 +123,15 @@ export interface WhiteboardSessionApi {
   /* network */
   setOnline(online: boolean): void;
   setConditions(patch: Partial<NetworkConditions>): void;
-  setRtcEnabled(enabled: boolean): void;
+
+  /* connecting other computers (WebRTC, serverless pairing) */
+  /** Start an invite; resolves once the invite code is ready to share. */
+  createInvite(): Promise<RtcLinkInfo>;
+  /** Other computer: accept an invite code (or a pasted invite link); resolves with the reply code. */
+  acceptInvite(text: string): Promise<RtcLinkInfo>;
+  /** Inviter: apply the reply code; the link then connects on its own. */
+  completeInvite(text: string): Promise<RtcLinkInfo>;
+  closeLink(pid: string): void;
   /** Immediately send hello/heartbeat and run an anti-entropy round. */
   syncNow(): void;
   /** Resolves once every live peer has our vc and hash (or rejects on timeout). */
@@ -162,4 +186,8 @@ export interface SessionOptions {
   heartbeatMs?: number;
   /** Skip the Web Locks identity lease (tests / insecure contexts fall back to nonce check). */
   useLocks?: boolean;
+  /** ICE servers for WebRTC (default: a public STUN server). Add TURN here for strict networks. */
+  iceServers?: RTCIceServer[];
+  /** Injectable RTCPeerConnection (tests). */
+  RTCPeerConnection?: typeof RTCPeerConnection;
 }
