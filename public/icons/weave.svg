@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Weave</title>
+  <!-- The Weave mark (src/components/ui/ThreadMark.tsx): thread A (vermilion) and thread B (teal)
+       crossing over and under each other, on warm paper. Halos in the paper colour cut the
+       "under" crossings so the weave reads. -->
+  <rect width="512" height="512" rx="112" fill="#f7f3ea"/>
+  <rect x="6" y="6" width="500" height="500" rx="106" fill="none" stroke="#ddd5c4" stroke-width="12"/>
+  <g transform="translate(40 40) scale(18)" fill="none" stroke-linecap="round">
+    <path d="M2 12c2.5 7 7 7 10 0s7.5-7 10 0" stroke="#1b998b" stroke-width="2.4"/>
+    <path d="M2 12c2.5-7 7-7 10 0" stroke="#f7f3ea" stroke-width="5"/>
+    <path d="M2 12c2.5-7 7-7 10 0" stroke="#e4572e" stroke-width="2.4"/>
+    <path d="M12 12c3 7 7.5 7 10 0" stroke="#e4572e" stroke-width="2.4"/>
+    <path d="M12 12c3-7 7.5-7 10 0" stroke="#f7f3ea" stroke-width="5"/>
+    <path d="M12 12c3-7 7.5-7 10 0" stroke="#1b998b" stroke-width="2.4"/>
+  </g>
+</svg>
