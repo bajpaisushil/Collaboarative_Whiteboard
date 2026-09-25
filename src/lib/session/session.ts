@@ -24,6 +24,7 @@ import { BroadcastTransport } from "../sync/transport";
 import { LinkRouter } from "../sync/router";
 import { RtcLink, rtcAvailable, type RtcOptions } from "../sync/rtc";
 import { decodePairing, PairingCodeError } from "../sync/rtc-codec";
+import { isValidMessage, sanitizePresence } from "../sync/validate";
 import { threadColor } from "../ui/colors";
 import { Persistence, safeSessionStorage, storageKey } from "./persistence";
 import type {
@@ -40,7 +41,9 @@ import type {
 } from "./types";
 
 const LABEL_WAIT_MS = 350;
-const MERGE_WINDOW_MAX_MS = 5000;
+/** A merge window closes once clocks match, after this long with no merge traffic, or at the cap. */
+const MERGE_IDLE_MS = 3000;
+const MERGE_WINDOW_MAX_MS = 30_000;
 const IDLE_MAX_MS = 5 * 60_000;
 const PRESENCE_MS = 33;
 const CHUNK_OPS = 250;
@@ -84,6 +87,7 @@ interface MergeWindow {
   direction: MergeReport["direction"];
   peers: Set<ReplicaId>;
   openedAt: number;
+  lastActivity: number;
   apartMs: number;
   vcBefore: VectorClock;
   received: OpId[];
@@ -296,6 +300,8 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     if (this.presenceTimer) this.timers.clearTimeout(this.presenceTimer);
     this.unsubReplica?.();
     this.domCleanup?.();
+    for (const link of this.links.values()) link.close();
+    this.links.clear();
     this.net?.close();
     this.releaseLease?.();
     this.releaseLease = null;
@@ -501,6 +507,8 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     return this.registerLink(link);
   }
 
+  private pendingAccepts = new Map<string, Promise<RtcLinkInfo>>();
+
   async acceptInvite(text: string): Promise<RtcLinkInfo> {
     this.requireRtc();
     const offer = await decodePairing(text);
@@ -509,12 +517,22 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     if (offer.room !== this.room) throw new RoomMismatchError(offer.room);
     const existing = this.links.get(offer.pid);
     if (existing) return linkInfo(existing);
-    const link = await RtcLink.accept(offer, this.me(), this.rtcOptions());
-    if (this.disposed) {
-      link.close();
-      throw new PairingCodeError("This board was closed.");
+    const pending = this.pendingAccepts.get(offer.pid);
+    if (pending) return pending;
+    const p = (async () => {
+      const link = await RtcLink.accept(offer, this.me(), this.rtcOptions());
+      if (this.disposed) {
+        link.close();
+        throw new PairingCodeError("This board was closed.");
+      }
+      return this.registerLink(link);
+    })();
+    this.pendingAccepts.set(offer.pid, p);
+    try {
+      return await p;
+    } finally {
+      this.pendingAccepts.delete(offer.pid);
     }
-    return this.registerLink(link);
   }
 
   async completeInvite(text: string): Promise<RtcLinkInfo> {
@@ -619,10 +637,14 @@ export class WhiteboardSession implements WhiteboardSessionApi {
   private pushTo(peer: ReplicaId, peerVc: VectorClock, force = false): void {
     const ops = this.replica.opsSince(peerVc);
     if (ops.length === 0) return;
+    // A slow WebRTC link still carrying an earlier push: don't queue the same ops behind
+    // themselves. The peer's next heartbeat after the queue drains re-evaluates the gap.
+    if ((this.router?.backlogTo(peer) ?? 0) > 0) return;
     const ourVc = this.replica.getView().vc;
     const inflight = this.inflight.get(peer);
     const t = this.now();
     if (!force && inflight && inflight.until > t && vcLeq(ourVc, inflight.vc)) return;
+    if (this.window) this.window.lastActivity = t;
     const c = this.conditions;
     this.inflight.set(peer, { vc: ourVc, until: t + 3 * (c.latencyMs + c.jitterMs) + 600 });
     for (let i = 0; i < ops.length; i += CHUNK_OPS) {
@@ -655,6 +677,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       };
       this.peers.set(msg.from, p);
     }
+    if (msg.nonce !== p.nonce) p.presenceSeq = -1; // a reloaded tab restarts its presence seq
     const announce = (p.left || (p.label === "?" && msg.label !== "?") || !this.announced.has(msg.from)) && msg.label !== "?";
     const prevVc = p.vc;
     Object.assign(p, { nonce: msg.nonce, label: msg.label, vc: msg.vc, stateHash: msg.stateHash, lastSeen: t, visible: msg.visible, left: false, rtc: msg.rtc });
@@ -678,8 +701,9 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     return p;
   }
 
-  private handle(msg: SyncMessage): void {
-    if (this.disposed || !msg || msg.v !== PROTOCOL_VERSION) return;
+  private handle(raw: SyncMessage): void {
+    if (this.disposed || !isValidMessage(raw)) return;
+    const msg = raw;
     if (msg.to && msg.to !== this.replica.id) return;
     if (msg.from === this.replica.id) {
       // Someone else is using our identity (only possible without Web Locks).
@@ -716,17 +740,25 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       }
       case "presence": {
         const p = this.peers.get(msg.from);
-        if (!p || msg.seq <= p.presenceSeq) return;
+        if (!p) return;
+        if (msg.nonce !== p.nonce) {
+          p.nonce = msg.nonce;
+          p.presenceSeq = -1;
+        }
+        if (msg.seq <= p.presenceSeq) return;
+        const state = sanitizePresence(msg.state);
+        if (!state) return;
         p.presenceSeq = msg.seq;
-        p.presence = msg.state;
+        p.presence = state;
         p.lastSeen = this.now();
         this.rebuildPresence();
         return; // presence lives in its own store; don't rebuild session state at 30 Hz
       }
       case "bye": {
         const p = this.peers.get(msg.from);
-        if (p) {
+        if (p && !p.left) {
           this.announced.delete(msg.from);
+          p.presenceSeq = -1;
           p.left = true;
           p.status = "left";
           p.presence = null;
@@ -750,6 +782,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     }
     const res = this.replica.receive(ops);
     if (res.applied.length) this.persistence.append(res.applied);
+    if (w && res.applied.length) w.lastActivity = this.now();
     if (w) {
       w.received.push(...res.applied.map((o) => o.id));
       for (const s of res.resurrected) w.resurrected.add(s);
@@ -779,6 +812,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       direction,
       peers: new Set(peers),
       openedAt: this.now(),
+      lastActivity: this.now(),
       apartMs,
       vcBefore: this.replica.getView().vc,
       received: [],
@@ -793,7 +827,8 @@ export class WhiteboardSession implements WhiteboardSessionApi {
   private maybeCloseWindow(): void {
     const w = this.window;
     if (!w) return;
-    if (this.now() - w.openedAt > MERGE_WINDOW_MAX_MS) return this.closeWindow();
+    const t = this.now();
+    if (t - w.openedAt > MERGE_WINDOW_MAX_MS || t - w.lastActivity > MERGE_IDLE_MS) return this.closeWindow();
     const view = this.replica.getView();
     if (view.pending.length) return;
     const live = [...this.peers.values()].filter((p) => !p.left && p.status !== "unreachable");

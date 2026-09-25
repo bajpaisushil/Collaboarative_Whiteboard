@@ -2,15 +2,18 @@
 /**
  * Other tabs in the room: letter in thread colour + status dot (shape-coded). Hover/focus
  * explains the link and how far behind they are; click previews the board as they last saw it.
+ * A tab on another computer (paired over WebRTC) carries a small laptop mark and reads
+ * "on another computer · WebRTC".
  */
 import clsx from "clsx";
-import { CircleCheck, TriangleAlert, Users } from "lucide-react";
+import { CircleCheck, Laptop, TriangleAlert, Users } from "lucide-react";
 import { useMemo } from "react";
 import type { PeerInfo, PeerStatus } from "@/lib/session/types";
 import { useSessionState } from "@/lib/session/react";
 import { useUiStore } from "@/lib/ui/store";
 import { STATUS_WORD, ThreadBadge } from "@/components/ui/ThreadBadge";
 import { TipBody, Tooltip } from "@/components/ui/Tooltip";
+import { selectRemoteReplicasKey } from "../pairing/links";
 import { selectNamedPeers } from "../selectors";
 
 const MAX_SHOWN = 5;
@@ -24,6 +27,32 @@ const STATUS_NOTE: Record<PeerStatus, string | null> = {
   left: "This tab was closed. Its edits stay in the history.",
 };
 
+/** Where a peer is: this computer (BroadcastChannel) or another one (WebRTC link, live or lost). */
+export type PeerPlace = "local" | "remote" | "remote-lost";
+
+export function peerPlace(peer: PeerInfo, remoteReplicas: ReadonlySet<string>): PeerPlace {
+  if (peer.transport === "webrtc") return "remote";
+  return remoteReplicas.has(peer.replica) ? "remote-lost" : "local";
+}
+
+export const PLACE_TEXT: Record<PeerPlace, string> = {
+  local: "on this computer · BroadcastChannel",
+  remote: "on another computer · WebRTC",
+  "remote-lost": "on another computer · link lost",
+};
+
+const PLACE_SPOKEN: Record<PeerPlace, string> = {
+  local: "",
+  remote: ", on another computer over WebRTC",
+  "remote-lost": ", on another computer, link lost",
+};
+
+/** Replicas reached over a WebRTC link (now or earlier), as a Set. */
+export function useRemoteReplicas(): ReadonlySet<string> {
+  const key = useSessionState(selectRemoteReplicasKey);
+  return useMemo(() => new Set(key ? key.split(",") : []), [key]);
+}
+
 function byStatusThenLabel(a: PeerInfo, b: PeerInfo): number {
   return STATUS_RANK[a.status] - STATUS_RANK[b.status] || a.label.localeCompare(b.label);
 }
@@ -33,12 +62,15 @@ export function PeerAvatars({ compact = false }: { compact?: boolean }) {
   const sorted = useMemo(() => [...peers].sort(byStatusThenLabel), [peers]);
   const shown = sorted.slice(0, MAX_SHOWN);
   const extra = sorted.length - shown.length;
+  const remote = useRemoteReplicas();
 
   if (sorted.length === 0) {
     return (
       <Tooltip
         content={
-          <TipBody title="No other tabs yet">Open another tab in this room (or try split view) to see edits sync and merge.</TipBody>
+          <TipBody title="No other tabs yet">
+            Open another tab in this room (or try split view) to see edits sync and merge — or connect another computer.
+          </TipBody>
         }
       >
         <span
@@ -58,7 +90,7 @@ export function PeerAvatars({ compact = false }: { compact?: boolean }) {
     <ul aria-label="Other tabs" className="flex shrink-0 items-center -space-x-1.5">
       {shown.map((p) => (
         <li key={p.replica}>
-          <PeerAvatar peer={p} />
+          <PeerAvatar peer={p} place={peerPlace(p, remote)} />
         </li>
       ))}
       {extra > 0 && (
@@ -72,7 +104,7 @@ export function PeerAvatars({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function PeerAvatar({ peer }: { peer: PeerInfo }) {
+function PeerAvatar({ peer, place }: { peer: PeerInfo; place: PeerPlace }) {
   const store = useUiStore();
   const L = peer.label;
   const gone = peer.status === "left";
@@ -84,7 +116,7 @@ function PeerAvatar({ peer }: { peer: PeerInfo }) {
   const tip = (
     <TipBody title={`Tab ${L} · ${STATUS_WORD[peer.status]}`}>
       <span className="block">
-        Link: <span className="font-medium text-ink">{peer.transport === "webrtc" ? "WebRTC (direct)" : "BroadcastChannel"}</span>
+        <span className={clsx("font-medium", place === "local" ? "text-ink-2" : "text-ink")}>{PLACE_TEXT[place]}</span>
         {peer.transportError && <span className="block text-knot">{peer.transportError}</span>}
       </span>
       {!gone && (
@@ -115,7 +147,7 @@ function PeerAvatar({ peer }: { peer: PeerInfo }) {
       <button
         type="button"
         aria-disabled={!canPreview || undefined}
-        aria-label={[`Tab ${L}, ${STATUS_WORD[peer.status]}.`, gone ? "" : `${seen}.`, peer.converged ? "Identical board." : ""]
+        aria-label={[`Tab ${L}, ${STATUS_WORD[peer.status]}${PLACE_SPOKEN[place]}.`, gone ? "" : `${seen}.`, peer.converged ? "Identical board." : ""]
           .filter(Boolean)
           .join(" ")}
         onClick={() => {
@@ -128,6 +160,11 @@ function PeerAvatar({ peer }: { peer: PeerInfo }) {
         )}
       >
         <ThreadBadge label={L} size="md" status={peer.status} dimmed={gone} />
+        {place !== "local" && (
+          <span aria-hidden className="absolute -right-1 -top-1 grid size-3.5 place-items-center rounded-full bg-panel text-ink-2 ring-1 ring-line-2">
+            <Laptop className="size-2.5" strokeWidth={2.25} />
+          </span>
+        )}
       </button>
     </Tooltip>
   );

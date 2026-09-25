@@ -1,11 +1,16 @@
 /**
- * One WebRTC DataChannel link to a replica on another computer, paired without a server:
- * the inviter's offer and the invitee's answer travel as copy-paste codes (rtc-codec.ts).
- * ICE is gathered completely before a code is produced (no trickle), so each side hands over
- * exactly one code.
+ * One WebRTC link to a replica on another computer, paired without a server: the inviter's
+ * offer and the invitee's answer travel as copy-paste codes (rtc-codec.ts). ICE is gathered
+ * completely before a code is produced (no trickle), so each side hands over exactly one code.
  *
- * Messages are JSON strings; anything larger than a safe SCTP message is chunked and
- * reassembled. Sending applies backpressure via `bufferedAmount`.
+ * Two DataChannels per link:
+ * - "weave"      ordered + reliable: ops, hello, sync-req, bye (anything that must arrive).
+ * - "weave-fast" unordered, maxRetransmits 0: heartbeats and presence — periodic, so a lost one
+ *   is replaced by the next, and they never queue behind a large catch-up.
+ *
+ * Messages are JSON strings; anything larger than a safe SCTP message is chunked (never
+ * splitting a UTF-16 surrogate pair — DataChannels carry UTF-8, so a lone surrogate would be
+ * replaced with U+FFFD and corrupt the op) and reassembled. Sending applies backpressure.
  */
 import type { ReplicaId } from "../crdt/types";
 import type { SyncMessage } from "./protocol";
@@ -19,8 +24,12 @@ export interface RtcOptions {
   RTCPeerConnection?: typeof RTCPeerConnection;
   /** Max time to wait for ICE gathering before producing a code with what we have. */
   gatherTimeoutMs?: number;
-  /** Give up if the link isn't up this long after the answer is applied. */
+  /** Inviter: give up if the link isn't up this long after the reply code is applied. */
   connectTimeoutMs?: number;
+  /** Invitee: how long a reply code stays usable (the inviter pastes it by hand, maybe much later). */
+  replyTtlMs?: number;
+  /** Give up on a link that stays "disconnected" (ICE lost) this long. */
+  disconnectTimeoutMs?: number;
 }
 
 export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
@@ -28,6 +37,7 @@ export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.
 const CHUNK = 16_000;
 const HIGH_WATER = 4 * 1024 * 1024;
 const LOW_WATER = 1024 * 1024;
+const FAST_TYPES: ReadonlySet<SyncMessage["t"]> = new Set(["heartbeat", "presence"]);
 
 export function rtcAvailable(ctor?: typeof RTCPeerConnection): boolean {
   return !!(ctor ?? (typeof RTCPeerConnection !== "undefined" ? RTCPeerConnection : undefined));
@@ -61,6 +71,22 @@ function waitForGathering(pc: RTCPeerConnection, timeoutMs: number): Promise<voi
   });
 }
 
+/** Split a string into ≤`size`-code-unit pieces without cutting a surrogate pair. */
+export function chunkString(s: string, size: number): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    let end = Math.min(s.length, i + size);
+    if (end < s.length) {
+      const c = s.charCodeAt(end - 1);
+      if (c >= 0xd800 && c <= 0xdbff) end--; // keep the high surrogate with its low half
+    }
+    out.push(s.slice(i, end));
+    i = end;
+  }
+  return out;
+}
+
 export interface RtcIdentity {
   room: string;
   replica: ReplicaId;
@@ -73,6 +99,7 @@ export class RtcLink {
   state: RtcLinkState = "gathering";
   /** The code this side must hand to the other side (offer for inviters, answer for invitees). */
   code: string | null = null;
+  /** The replica on the other end (updated from its messages, so it follows a remote fork). */
   remoteReplica: ReplicaId | null = null;
   remoteLabel: string | null = null;
   error: string | null = null;
@@ -80,12 +107,14 @@ export class RtcLink {
 
   private pc: RTCPeerConnection;
   private dc: RTCDataChannel | null = null;
+  private fast: RTCDataChannel | null = null;
   private handlers = new Set<(msg: SyncMessage) => void>();
   private stateHandlers = new Set<(link: RtcLink) => void>();
   private outbox: string[] = [];
+  private outboxBytes = 0;
   private partial = new Map<string, string[]>();
   private chunkSeq = 0;
-  private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly opts: RtcOptions;
 
   private constructor(role: "inviter" | "invitee", pid: string, opts: RtcOptions) {
@@ -100,11 +129,17 @@ export class RtcLink {
   /** Inviter: create the offer code. */
   static async invite(me: RtcIdentity, opts: RtcOptions = {}): Promise<RtcLink> {
     const link = new RtcLink("inviter", randomPid(), opts);
-    link.attach(link.pc.createDataChannel("weave", { ordered: true }));
-    await link.pc.setLocalDescription(await link.pc.createOffer());
-    await waitForGathering(link.pc, opts.gatherTimeoutMs ?? 4000);
-    const offer: PairingOffer = { v: 1, k: "offer", pid: link.pid, room: me.room, from: me.replica, label: me.label, sdp: link.pc.localDescription?.sdp ?? "" };
-    link.code = await encodePairing(offer);
+    try {
+      link.attach(link.pc.createDataChannel("weave", { ordered: true }));
+      link.attach(link.pc.createDataChannel("weave-fast", { ordered: false, maxRetransmits: 0 }));
+      await link.pc.setLocalDescription(await link.pc.createOffer());
+      await waitForGathering(link.pc, opts.gatherTimeoutMs ?? 4000);
+      const offer: PairingOffer = { v: 1, k: "offer", pid: link.pid, room: me.room, from: me.replica, label: me.label, sdp: link.pc.localDescription?.sdp ?? "" };
+      link.code = await encodePairing(offer);
+    } catch (e) {
+      link.close();
+      throw e;
+    }
     link.setState("waiting-answer");
     return link;
   }
@@ -115,13 +150,19 @@ export class RtcLink {
     link.remoteReplica = offer.from;
     link.remoteLabel = offer.label;
     link.pc.addEventListener("datachannel", (e) => link.attach(e.channel));
-    await link.pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
-    await link.pc.setLocalDescription(await link.pc.createAnswer());
-    await waitForGathering(link.pc, opts.gatherTimeoutMs ?? 4000);
-    const answer: PairingAnswer = { v: 1, k: "answer", pid: offer.pid, room: me.room, from: me.replica, label: me.label, sdp: link.pc.localDescription?.sdp ?? "" };
-    link.code = await encodePairing(answer);
+    try {
+      await link.pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
+      await link.pc.setLocalDescription(await link.pc.createAnswer());
+      await waitForGathering(link.pc, opts.gatherTimeoutMs ?? 4000);
+      const answer: PairingAnswer = { v: 1, k: "answer", pid: offer.pid, room: me.room, from: me.replica, label: me.label, sdp: link.pc.localDescription?.sdp ?? "" };
+      link.code = await encodePairing(answer);
+    } catch (e) {
+      link.close();
+      throw e instanceof PairingCodeError ? e : new PairingCodeError("That invite couldn't be used — ask for a fresh one.");
+    }
     link.setState("connecting");
-    link.armConnectTimeout();
+    // The inviter pastes our reply by hand, possibly minutes later: wait patiently.
+    link.armTimer(opts.replyTtlMs ?? 15 * 60_000, "The reply code expired before it was used — make a new invite.");
     return link;
   }
 
@@ -135,41 +176,62 @@ export class RtcLink {
     this.remoteReplica = answer.from;
     this.remoteLabel = answer.label;
     this.setState("connecting");
-    await this.pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
-    this.armConnectTimeout();
+    this.armTimer(this.opts.connectTimeoutMs ?? 30_000, "Couldn't reach the other computer. Strict networks may need a TURN server.");
+    try {
+      await this.pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+    } catch {
+      this.fail("That reply code couldn't be used — it may be damaged or from an older invite.");
+      throw new PairingCodeError("That reply code couldn't be used — it may be damaged or from an older invite.");
+    }
   }
 
-  private armConnectTimeout(): void {
-    if (this.connectTimer) clearTimeout(this.connectTimer);
-    this.connectTimer = setTimeout(() => {
-      if (this.state === "connecting") this.fail("Couldn't reach the other computer. Strict networks may need a TURN server.");
-    }, this.opts.connectTimeoutMs ?? 20_000);
+  private armTimer(ms: number, message: string): void {
+    this.clearTimer();
+    const from = this.state;
+    this.timer = setTimeout(() => {
+      if (this.state === from) this.fail(message);
+    }, ms);
+  }
+
+  private clearTimer(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
   }
 
   private attach(dc: RTCDataChannel): void {
+    if (dc.label === "weave-fast") {
+      this.fast = dc;
+      dc.addEventListener("message", (e) => this.onData(e.data));
+      return;
+    }
     this.dc = dc;
     dc.bufferedAmountLowThreshold = LOW_WATER;
     dc.addEventListener("open", () => {
-      if (this.connectTimer) clearTimeout(this.connectTimer);
+      this.clearTimer();
       this.setState("connected");
       this.flush();
     });
-    dc.addEventListener("close", () => {
-      if (this.state !== "failed") this.setState("closed");
-    });
+    // The other computer closed (or the transport died): release our side too.
+    dc.addEventListener("close", () => this.close());
     dc.addEventListener("bufferedamountlow", () => this.flush());
     dc.addEventListener("message", (e) => this.onData(e.data));
   }
 
   private onConnectionState = () => {
     const s = this.pc.connectionState;
-    if (s === "connected" && this.dc?.readyState === "open") this.setState("connected");
-    else if (s === "disconnected" && this.state === "connected") this.setState("disconnected"); // may recover on its own
-    else if (s === "failed") this.fail("The connection to the other computer was lost.");
-    else if (s === "closed") this.setState("closed");
+    if (s === "connected" && this.dc?.readyState === "open") {
+      this.clearTimer();
+      this.setState("connected");
+    } else if (s === "disconnected" && this.state === "connected") {
+      // ICE lost the path; browsers often recover within seconds. Don't wait forever.
+      this.setState("disconnected");
+      this.armTimer(this.opts.disconnectTimeoutMs ?? 30_000, "The connection to the other computer was lost.");
+    } else if (s === "failed") this.fail("The connection to the other computer was lost.");
+    else if (s === "closed") this.close();
   };
 
   private fail(message: string): void {
+    if (this.state === "closed" || this.state === "failed") return;
     this.error = message;
     this.setState("failed");
     this.close();
@@ -177,7 +239,8 @@ export class RtcLink {
 
   private setState(s: RtcLinkState): void {
     if (this.state === s) return;
-    if ((this.state === "closed" || this.state === "failed") && s !== "failed") return;
+    // Terminal states are final: no "failed" after "closed", nothing after either.
+    if (this.state === "closed" || this.state === "failed") return;
     this.state = s;
     for (const h of [...this.stateHandlers]) h(this);
   }
@@ -196,29 +259,50 @@ export class RtcLink {
     return this.dc?.readyState === "open";
   }
 
+  /** Bytes queued locally or in the reliable channel's buffer (used to avoid re-pushing catch-up). */
+  get backlog(): number {
+    return this.outboxBytes + (this.dc?.bufferedAmount ?? 0);
+  }
+
   /* ------------------------------------------------------------ framing */
 
   send(msg: SyncMessage): void {
     if (this.state === "closed" || this.state === "failed") return;
     const json = JSON.stringify(msg);
-    if (json.length <= CHUNK) this.outbox.push("m" + json);
+    if (FAST_TYPES.has(msg.t) && json.length <= CHUNK && this.fast?.readyState === "open") {
+      try {
+        this.fast.send("m" + json);
+        return;
+      } catch {
+        // fall back to the reliable channel
+      }
+    }
+    if (json.length <= CHUNK) this.enqueue("m" + json);
     else {
       const id = `${this.pid}-${++this.chunkSeq}`;
-      const n = Math.ceil(json.length / CHUNK);
-      for (let i = 0; i < n; i++) this.outbox.push(`c${id}|${i}|${n}|${json.slice(i * CHUNK, (i + 1) * CHUNK)}`);
+      const parts = chunkString(json, CHUNK);
+      parts.forEach((p, i) => this.enqueue(`c${id}|${i}|${parts.length}|${p}`));
     }
     this.flush();
+  }
+
+  private enqueue(frame: string): void {
+    this.outbox.push(frame);
+    this.outboxBytes += frame.length;
   }
 
   private flush(): void {
     const dc = this.dc;
     if (!dc || dc.readyState !== "open") return;
     while (this.outbox.length && dc.bufferedAmount < HIGH_WATER) {
+      const frame = this.outbox[0];
       try {
-        dc.send(this.outbox.shift()!);
+        dc.send(frame);
       } catch {
         return; // channel closing; anti-entropy repairs anything lost
       }
+      this.outbox.shift();
+      this.outboxBytes -= frame.length;
     }
   }
 
@@ -240,8 +324,9 @@ export class RtcLink {
         if (this.partial.size > 64) this.partial.clear(); // bound memory against garbage
         this.partial.set(id, (parts = new Array<string>(n)));
       }
+      if (parts.length !== n) return;
       parts[i] = data.slice(c + 1);
-      if (parts.filter((p) => p !== undefined).length < n) return;
+      for (let k = 0; k < n; k++) if (parts[k] === undefined) return;
       this.partial.delete(id);
       json = parts.join("");
     }
@@ -253,16 +338,18 @@ export class RtcLink {
       return;
     }
     if (!msg || typeof msg !== "object" || typeof (msg as { t?: unknown }).t !== "string") return;
-    if (!this.remoteReplica && typeof msg.from === "string") this.remoteReplica = msg.from;
+    if (typeof msg.from === "string" && msg.from.length <= 64) this.remoteReplica = msg.from;
     for (const h of [...this.handlers]) h(msg);
   }
 
   close(): void {
-    if (this.connectTimer) clearTimeout(this.connectTimer);
-    try {
-      this.dc?.close();
-    } catch {
-      /* already closed */
+    this.clearTimer();
+    for (const ch of [this.dc, this.fast]) {
+      try {
+        ch?.close();
+      } catch {
+        /* already closed */
+      }
     }
     try {
       this.pc.close();
@@ -270,7 +357,8 @@ export class RtcLink {
       /* already closed */
     }
     this.outbox = [];
+    this.outboxBytes = 0;
     this.partial.clear();
-    if (this.state !== "failed") this.setState("closed");
+    this.setState("closed");
   }
 }

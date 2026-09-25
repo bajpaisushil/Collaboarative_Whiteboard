@@ -2,7 +2,8 @@
  * Minimal in-memory RTCPeerConnection/RTCDataChannel pair for node tests. Two fakes are
  * "wired" when the inviter applies the invitee's answer: the offer SDP carries a registry key,
  * so the answer side can find its peer. Data channels deliver asynchronously (like the real
- * thing) and track bufferedAmount so backpressure code paths run.
+ * thing), round-trip strings through UTF-8 exactly like a real DataChannel (so a lone
+ * surrogate becomes U+FFFD), and track bufferedAmount so backpressure code paths run.
  */
 
 type Listener = (e: unknown) => void;
@@ -29,7 +30,10 @@ export class FakeDataChannel extends Emitter {
   peer: FakeDataChannel | null = null;
   /** Every string sent (for assertions about framing). */
   sent: string[] = [];
-  constructor(readonly label: string) {
+  constructor(
+    readonly label: string,
+    readonly init?: RTCDataChannelInit,
+  ) {
     super();
   }
   /** @internal */ open() {
@@ -41,10 +45,11 @@ export class FakeDataChannel extends Emitter {
     this.sent.push(data);
     this.bufferedAmount += data.length;
     const peer = this.peer;
+    const wire = new TextDecoder().decode(new TextEncoder().encode(data)); // USVString on the wire
     queueMicrotask(() => {
       this.bufferedAmount = Math.max(0, this.bufferedAmount - data.length);
       if (this.bufferedAmount <= this.bufferedAmountLowThreshold) this.emit("bufferedamountlow");
-      if (peer && peer.readyState === "open") peer.emit("message", { data });
+      if (peer && peer.readyState === "open") peer.emit("message", { data: wire });
     });
   }
   close() {
@@ -65,7 +70,7 @@ export class FakePeerConnection extends Emitter {
   localDescription: { type: string; sdp: string } | null = null;
   remoteDescription: { type: string; sdp: string } | null = null;
   private key = `fake-${++seq}`;
-  private channel: FakeDataChannel | null = null;
+  private channels: FakeDataChannel[] = [];
   /** Set to make this side never connect (connect-timeout tests). */
   static blackhole = false;
 
@@ -73,9 +78,10 @@ export class FakePeerConnection extends Emitter {
     super();
     registry.set(this.key, this);
   }
-  createDataChannel(label: string) {
-    this.channel = new FakeDataChannel(label);
-    return this.channel;
+  createDataChannel(label: string, init?: RTCDataChannelInit) {
+    const ch = new FakeDataChannel(label, init);
+    this.channels.push(ch);
+    return ch;
   }
   async createOffer() {
     return { type: "offer", sdp: `v=0 offer ${this.key}` };
@@ -89,26 +95,34 @@ export class FakePeerConnection extends Emitter {
   }
   async setRemoteDescription(d: { type: string; sdp: string }) {
     this.remoteDescription = d;
-    if (d.type === "answer" && this.channel && !FakePeerConnection.blackhole) {
+    if (d.type === "answer" && !/^v=0 answer fake-\d+$/.test(d.sdp)) throw new Error("InvalidAccessError: bad answer SDP");
+    if (d.type === "answer" && this.channels.length && !FakePeerConnection.blackhole) {
       const peerKey = d.sdp.split(" ").pop()!;
       const peer = registry.get(peerKey);
       if (!peer) return;
-      const remote = new FakeDataChannel(this.channel.label);
-      this.channel.peer = remote;
-      remote.peer = this.channel;
+      const pairs = this.channels.map((local) => {
+        const remote = new FakeDataChannel(local.label, local.init);
+        local.peer = remote;
+        remote.peer = local;
+        peer.channels.push(remote);
+        return [local, remote] as const;
+      });
       queueMicrotask(() => {
         this.connectionState = peer.connectionState = "connected";
-        peer.emit("datachannel", { channel: remote });
-        this.channel!.open();
-        remote.open();
+        for (const [, remote] of pairs) peer.emit("datachannel", { channel: remote });
+        for (const [local, remote] of pairs) {
+          local.open();
+          remote.open();
+        }
         this.emit("connectionstatechange");
         peer.emit("connectionstatechange");
       });
     }
   }
   close() {
+    if (this.connectionState === "closed") return;
     this.connectionState = "closed";
-    this.channel?.close();
+    for (const ch of this.channels) ch.close();
     registry.delete(this.key);
     this.emit("connectionstatechange");
   }

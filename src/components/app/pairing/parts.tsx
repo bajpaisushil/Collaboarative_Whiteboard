@@ -1,5 +1,9 @@
 "use client";
-/** Building blocks of the pairing dialog: code boxes with copy buttons, busy lines, errors, steps. */
+/**
+ * Building blocks of the pairing dialog: code boxes with copy buttons, busy lines, errors,
+ * steps. `data-step-focus` marks the control that should take focus when a step changes
+ * (see useStepFocus in PairingDialog).
+ */
 import clsx from "clsx";
 import { Check, CircleAlert, Copy, LoaderCircle, type LucideIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
@@ -9,6 +13,8 @@ export const PRIMARY_BTN =
   "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-[10px] bg-ink px-3 text-[12.5px] font-semibold text-paper transition-[background-color,transform] duration-100 hover:bg-ink-2 active:translate-y-px disabled:pointer-events-none disabled:opacity-40";
 export const SECONDARY_BTN =
   "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-[10px] border border-line-2 px-2.5 text-[12.5px] font-medium text-ink transition-[background-color,transform] duration-100 hover:bg-panel-2 active:translate-y-px disabled:pointer-events-none disabled:opacity-40";
+export const SMALL_BTN =
+  "inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-[8px] border border-line-2 px-2 text-[12px] font-medium text-ink transition-[background-color,transform] duration-100 hover:bg-panel-2 active:translate-y-px";
 export const QUIET_BTN =
   "inline-flex h-7 shrink-0 items-center gap-1 rounded-[8px] px-2 text-[12px] font-medium text-ink-2 underline decoration-line-2 underline-offset-2 hover:bg-panel-2 hover:text-ink";
 
@@ -55,6 +61,8 @@ export interface CopyAction {
   what: string;
   text: string;
   primary?: boolean;
+  /** Take focus when this step appears. */
+  stepFocus?: boolean;
 }
 
 /** Read-only code/link box with copy buttons; a click selects everything for a manual copy. */
@@ -109,7 +117,13 @@ export function CodeBox({ value, label, actions, rows = 3 }: { value: string; la
         {actions.map((a) => {
           const done = status?.id === a.id && status.ok;
           return (
-            <button key={a.id} type="button" onClick={() => void copy(a)} className={a.primary ? PRIMARY_BTN : SECONDARY_BTN}>
+            <button
+              key={a.id}
+              type="button"
+              onClick={() => void copy(a)}
+              data-step-focus={a.stepFocus ? "" : undefined}
+              className={a.primary ? PRIMARY_BTN : SECONDARY_BTN}
+            >
               {done ? <Check aria-hidden className="size-3.5" strokeWidth={2.25} /> : <Copy aria-hidden className="size-3.5" />}
               {done ? "Copied" : a.label}
             </button>
@@ -123,9 +137,10 @@ export function CodeBox({ value, label, actions, rows = 3 }: { value: string; la
   );
 }
 
+/** A spinner line. Not a live region itself: the dialog's announcer speaks state changes. */
 export function Busy({ children }: { children: ReactNode }) {
   return (
-    <p role="status" className="flex items-center gap-2 text-[12.5px] text-ink-2">
+    <p className="flex items-center gap-2 text-[12.5px] text-ink-2">
       <LoaderCircle aria-hidden className="size-4 shrink-0 animate-spin text-muted motion-reduce:animate-none" />
       <span>{children}</span>
     </p>

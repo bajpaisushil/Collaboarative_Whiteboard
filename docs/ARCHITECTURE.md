@@ -294,7 +294,6 @@ Channel name: `weave:${room}` (room from `?room=`, default `lobby`).
 | `heartbeat`  | every ~1.5 s: vc + stateHash + visibility (anti-entropy, stability, convergence badge) |
 | `presence`   | cursor, in-progress stroke, drag preview, selection, editing target (~30 Hz, never logged) |
 | `bye`        | tab closing |
-| `rtc-*`      | WebRTC signalling (offer/answer/ice) when the WebRTC upgrade is on |
 
 Anti-entropy: on any `hello`/`heartbeat`, if the peer lacks ops we have → send them
 (targeted, chunked), suppressing repeat pushes while an earlier one is still in flight. Ops

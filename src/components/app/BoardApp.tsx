@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { SessionOptions } from "@/lib/session/types";
 import { useAcquiredSession } from "@/lib/session/react";
 import { BoardSurface } from "./BoardSurface";
+import type { IceMode } from "./pairing/store";
 import { parseBoardParams, parseJoinHash, stripFreshParam, type BoardParams } from "./params";
 import { ReadyGate } from "./ReadyGate";
 import { Splash } from "./Splash";
@@ -16,7 +17,7 @@ import { applyStoredTheme } from "./theme";
 
 export default function BoardApp() {
   // Client-only component (loaded with ssr:false), so reading the URL on first render is safe.
-  const [params] = useState<BoardParams>(() => parseBoardParams(window.location.search));
+  const [params] = useState<BoardParams>(() => parseBoardParams(window.location.search, window.location.hash));
   const [joinCode] = useState<string | null>(() => parseJoinHash(window.location.hash));
 
   useEffect(() => {
@@ -38,11 +39,12 @@ export default function BoardApp() {
     [params],
   );
   const session = useAcquiredSession(options);
+  const ice: IceMode = params.iceServers === undefined ? "default" : params.iceServers.length === 0 ? "none" : "custom";
 
   if (!session) return <Splash />;
   return (
     <ReadyGate session={session}>
-      <BoardSurface session={session} joinCode={joinCode} />
+      <BoardSurface session={session} joinCode={joinCode} ice={ice} />
     </ReadyGate>
   );
 }

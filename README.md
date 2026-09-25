@@ -4,8 +4,8 @@ An **offline-first collaborative whiteboard** where every browser tab is a separ
 Pull a tab's cable, keep drawing in both, plug it back in — and Weave merges everything
 deterministically, then shows you **exactly why** each conflict was resolved the way it was.
 
-No server. No database. Tabs talk over `BroadcastChannel`; each tab's operation log lives in
-its own `sessionStorage`.
+No server. No database. Tabs talk over `BroadcastChannel`, two computers pair directly over
+WebRTC, and each tab's operation log lives in its own `sessionStorage`.
 
 ```
 Tab A                    Tab B
@@ -34,6 +34,39 @@ npm run dev          # http://localhost:3000
 - **Two real tabs** — open `/` and press **Open Tab B** (or open the same URL in a second
   tab). Unplug one tab with the cable switch (`\`), edit the same shape in both, plug back
   in, and click the knot.
+- **Two computers** — see below.
+
+## Two computers
+
+Two browsers on different computers link directly over WebRTC — still no server and no
+account. Pairing is copy-paste:
+
+1. On the first computer click **Connect another computer** (the laptop in the top bar) →
+   **Create invite**. After a few seconds you get an invite link.
+2. Send it to the other computer (chat, email…) and open it there — or paste it under
+   **Join an invite**. That computer opens the same board and shows a **reply code**.
+3. Send the reply code back and paste it on the first computer. Both show **Connected**;
+   edits sync both ways, and each computer's other tabs sync through the paired tab.
+
+If the connection drops, keep working: both sides keep every edit and merge after you re-pair.
+
+- **What travels where.** The codes carry each side's connection details (a WebRTC session
+  description). The invite code sits in the link's `#join=` fragment, so it never reaches a
+  server log. The board itself only ever travels computer to computer.
+- **STUN.** By default each browser asks a public STUN server (`stun.l.google.com`) for its
+  public address so the two computers can find each other across networks. It sees
+  addresses, never your board.
+- **TURN.** Strict networks (corporate firewalls, some mobile carriers) block direct
+  connections; then a TURN relay is needed. Pass your own ICE servers as a URL-encoded JSON
+  array of `RTCIceServer`, e.g. `'?ice=' + encodeURIComponent(JSON.stringify([{ urls:
+  "turn:turn.example.com:3478", username: "u", credential: "p" }]))`. Invite links carry
+  `?ice=` over to the other computer.
+- **Same network.** `?ice=none` skips STUN and uses local addresses only — pairing then
+  works on one LAN/Wi-Fi with no internet at all.
+- **Offline.** After one online visit a service worker keeps a copy of the app, so `/` and
+  `/split` load with no network. Service workers need a secure context: `https://` or
+  `http://localhost` (on a plain `http://192.168…` address the app still works online, but
+  won't load offline and the copy buttons fall back to select-and-copy).
 
 ## What's inside (all hand-written, no CRDT library)
 
@@ -46,7 +79,7 @@ npm run dev          # http://localhost:3000
 | Undo / redo | `src/lib/crdt/undo.ts` | Local, selective, compensating ops; never clobbers someone else's later or concurrent edit, and tells you what it skipped |
 | Snapshots | `replica.ts` | Named snapshots are shared ops holding a causal cut; preview any cut; restore as ordinary (undoable, mergeable) edits; time travel over the canonical history |
 | Conflict visualisation | `src/lib/crdt/conflicts.ts`, `explain.ts`, `src/components/why` | Deterministic conflicts (identical ids in every tab), knots on the canvas, ghosts of the losing value, and the explainer |
-| Communication | `src/lib/sync` | BroadcastChannel + anti-entropy; a network simulator for offline, latency, jitter, drops, duplicates and clock drift |
+| Communication | `src/lib/sync` | BroadcastChannel between tabs, WebRTC DataChannels between computers (serverless copy-paste pairing), anti-entropy over both; a network simulator for offline, latency, jitter, drops, duplicates and clock drift |
 
 ### The explainer
 

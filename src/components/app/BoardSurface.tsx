@@ -4,6 +4,7 @@
  * the layout — floating top sheet, full-bleed canvas with floating tool dock, time-travel /
  * diverging / merge cards top-centre, the Why sheet on the right, the Loom along the bottom,
  * and the identity frame around everything. /split renders two of these (compact).
+ * Full panes also offer "Connect another computer" (WebRTC pairing); compact panes don't.
  */
 import clsx from "clsx";
 import {
@@ -29,6 +30,9 @@ import { Coach } from "./Coach";
 import { DivergingBanner } from "./DivergingBanner";
 import { IdentityFrame } from "./IdentityFrame";
 import { MergeCard } from "./MergeCard";
+import { PairingDialog } from "./pairing/PairingDialog";
+import { PairingProvider } from "./pairing/PairingProvider";
+import type { IceMode } from "./pairing/store";
 import { PaneHotkeys } from "./PaneHotkeys";
 import { ReadyGate } from "./ReadyGate";
 import { RegionBoundary } from "./RegionBoundary";
@@ -46,6 +50,10 @@ export interface BoardSurfaceProps {
   /** Share a UI store created outside (e.g. /split syncing focus across panes). */
   uiStore?: StoreApi<UiStore>;
   paneId?: string;
+  /** Invite code from the URL (`#join=`): the pairing dialog accepts it once (full panes only). */
+  joinCode?: string | null;
+  /** How this page reaches other computers (`?ice=`); only changes the pairing dialog's wording. */
+  ice?: IceMode;
 }
 
 const INSET = 10;
@@ -54,7 +62,7 @@ const INSET = 10;
 const KEEPS_FOCUS =
   'input,textarea,select,button,a[href],[contenteditable=""],[contenteditable="true"],[tabindex]:not([tabindex="-1"]),[role="dialog"],[data-keep-focus]';
 
-export function BoardSurface({ session, compact = false, uiStore, paneId = "main" }: BoardSurfaceProps) {
+export function BoardSurface({ session, compact = false, uiStore, paneId = "main", joinCode = null, ice = "default" }: BoardSurfaceProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const pane = useMemo<PaneContextValue>(() => ({ paneId, compact, rootRef }), [paneId, compact]);
 
@@ -68,9 +76,17 @@ export function BoardSurface({ session, compact = false, uiStore, paneId = "main
       <SessionProvider session={session}>
         <UiStoreProvider store={uiStore}>
           <PaneProvider value={pane}>
-            <ToastProvider>
-              <BoardLayout rootRef={rootRef} compact={compact} paneId={paneId} />
-            </ToastProvider>
+            {compact ? (
+              <ToastProvider>
+                <BoardLayout rootRef={rootRef} compact paneId={paneId} />
+              </ToastProvider>
+            ) : (
+              <PairingProvider joinCode={joinCode} ice={ice}>
+                <ToastProvider>
+                  <BoardLayout rootRef={rootRef} compact={false} paneId={paneId} />
+                </ToastProvider>
+              </PairingProvider>
+            )}
           </PaneProvider>
         </UiStoreProvider>
       </SessionProvider>
@@ -162,6 +178,7 @@ function BoardLayout({ rootRef, compact, paneId }: { rootRef: RefObject<HTMLDivE
       </div>
 
       <ShortcutSheet />
+      {!compact && <PairingDialog />}
       <IdentityFrame />
     </div>
   );

@@ -1,25 +1,33 @@
 "use client";
 /**
  * Turns session events into toasts: undo/redo results (with per-property skips), forks,
- * storage errors, info, and peers arriving/leaving. Merge reports get their own card.
+ * storage errors, info, peers arriving/leaving, and WebRTC links to other computers
+ * connecting, dropping or failing. Merge reports get their own card.
  *
  * Timing details handled here:
  * - A duplicated tab forks while claiming its identity — before the board (and this
  *   component) mounts — so a fork that already happened is announced on mount.
  * - A new tab says hello before it has picked its letter ("?"), so its "joined" toast waits
  *   until the letter is known.
+ * - Two computers often both start as Tab A; right after pairing one of them re-picks. So a
+ *   link's "connected" toast waits (briefly) until the other side's letter is settled, and
+ *   replaces the plain "joined" toast for that tab.
  */
-import { GitFork, HardDriveDownload, Redo2, Undo2, UserMinus, UserPlus } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { GitFork, HardDriveDownload, Laptop, Redo2, Undo2, Unplug, UserMinus, UserPlus } from "lucide-react";
+import { useEffect, useEffectEvent, useRef } from "react";
 import type { ReplicaId, UndoResult, UndoSkip } from "@/lib/crdt/types";
 import { propsNoun } from "@/lib/crdt/describe";
-import type { PeerStatus, WhiteboardSessionApi } from "@/lib/session/types";
+import type { PeerStatus, RtcLinkInfo, SessionEvent, WhiteboardSessionApi } from "@/lib/session/types";
 import { useSession, useSessionEvent } from "@/lib/session/react";
 import { useToast, type ToastApi, type ToastOptions } from "@/components/ui/Toast";
+import { consumeUserClosed, remoteLabelIn, remoteName } from "./pairing/links";
+import { usePairingStore } from "./pairing/PairingProvider";
 import { hasLabel, labelOf } from "./selectors";
 
 /** Give up waiting for a booting peer's letter after this long (it may have crashed). */
 const JOIN_LABEL_WAIT_MS = 6000;
+/** Wait at most this long for a newly linked computer's letter to settle before announcing. */
+const LINK_LABEL_WAIT_MS = 3000;
 
 /** Sessions whose fork has been announced (survives StrictMode remounts and pane remounts). */
 const announcedForks = new WeakSet<WhiteboardSessionApi>();
@@ -71,6 +79,21 @@ function pushFork(toast: ToastApi, label: string): void {
   });
 }
 
+/** A replica we reach (or reached) over a WebRTC link: its link toasts replace "joined". */
+function isLinkedReplica(session: WhiteboardSessionApi, replica: ReplicaId): boolean {
+  return session.getState().rtc.links.some((l) => l.remoteReplica === replica);
+}
+
+/**
+ * The linked tab's letter once it is settled: known, and not the same as ours (a clash
+ * is resolved within a heartbeat by one side re-picking). Null while still settling.
+ */
+function settledLinkLabel(session: WhiteboardSessionApi, link: RtcLinkInfo): string | null {
+  const st = session.getState();
+  const peer = link.remoteReplica ? st.peers.find((p) => p.replica === link.remoteReplica) : undefined;
+  return peer && hasLabel(peer) && peer.label !== st.label ? peer.label : null;
+}
+
 function pushJoined(toast: ToastApi, replica: ReplicaId, label: string): void {
   toast.push({ id: `peer-${replica}`, title: `Tab ${label} joined`, icon: UserPlus, tone: "ok", durationMs: 3500 });
 }
@@ -86,8 +109,91 @@ function storageDetail(message: string): string {
 export function SessionToasts() {
   const session = useSession();
   const toast = useToast();
+  const pairing = usePairingStore();
   /** Peers that joined before choosing a letter: replica → when we first heard of them. */
   const pendingJoins = useRef(new Map<ReplicaId, number>());
+  /** Links that just connected, waiting for the other side's letter: pid → link + fallback timer. */
+  const pendingLinks = useRef(new Map<string, { link: RtcLinkInfo; timer: ReturnType<typeof setTimeout> }>());
+
+  const pushLinkConnected = (link: RtcLinkInfo, label: string | null) => {
+    const pending = pendingLinks.current.get(link.pid);
+    if (pending) clearTimeout(pending.timer);
+    pendingLinks.current.delete(link.pid);
+    toast.push({
+      id: `link-${link.pid}`,
+      title: `Connected to ${remoteName(label, "a tab")} on another computer`,
+      detail: "Edits now sync directly between the two computers.",
+      tone: "ok",
+      icon: Laptop,
+      durationMs: 5000,
+    });
+  };
+
+  const announceLink = useEffectEvent((link: RtcLinkInfo, label: string) => pushLinkConnected(link, label));
+
+  const repairAction = (link: RtcLinkInfo): ToastOptions["action"] =>
+    pairing ? { label: "Re-pair", onClick: () => pairing.getState().repair(link.pid) } : undefined;
+
+  const onLinkEvent = (e: Extract<SessionEvent, { type: "link" }>) => {
+    const { link, change } = e;
+    if (change === "connected") {
+      const label = settledLinkLabel(session, link);
+      if (label) {
+        pushLinkConnected(link, label);
+        return;
+      }
+      const timer = setTimeout(() => {
+        const p = pendingLinks.current.get(link.pid);
+        if (p) pushLinkConnected(p.link, remoteLabelIn(session.getState(), p.link));
+      }, LINK_LABEL_WAIT_MS);
+      pendingLinks.current.set(link.pid, { link, timer });
+      return;
+    }
+    const pending = pendingLinks.current.get(link.pid);
+    if (pending) clearTimeout(pending.timer);
+    pendingLinks.current.delete(link.pid);
+    const name = remoteName(remoteLabelIn(session.getState(), link), "the other computer");
+    if (change === "lost") {
+      if (consumeUserClosed(session, link.pid)) {
+        toast.push({
+          id: `link-${link.pid}`,
+          title: `Disconnected from ${name}`,
+          detail: "Your edits keep working here. Pair again any time to sync.",
+          icon: Unplug,
+          durationMs: 4000,
+        });
+        return;
+      }
+      toast.push({
+        id: `link-${link.pid}`,
+        title: `Lost the connection to ${name}`,
+        detail: "Your edits keep working and merge when you reconnect. Re-pair to reconnect.",
+        tone: "warn",
+        icon: Unplug,
+        durationMs: 12_000,
+        action: repairAction(link),
+      });
+      return;
+    }
+    toast.push({
+      id: `link-${link.pid}`,
+      title: link.error ?? `The connection to ${name} failed.`,
+      detail: "Your edits are safe and keep working. Re-pair to try again.",
+      tone: "error",
+      icon: Unplug,
+      durationMs: 12_000,
+      action: repairAction(link),
+    });
+  };
+
+  // Fallback timers of links still waiting for a letter.
+  useEffect(() => {
+    const pending = pendingLinks.current;
+    return () => {
+      for (const p of pending.values()) clearTimeout(p.timer);
+      pending.clear();
+    };
+  }, []);
 
   // A fork that happened before the board mounted (duplicate tab detected at start-up).
   useEffect(() => {
@@ -102,14 +208,44 @@ export function SessionToasts() {
   // the session doesn't emit "peer-joined" for a peer it already knows).
   useEffect(() => {
     const pending = pendingJoins.current;
+    const links = pendingLinks.current;
     const statuses = new Map<ReplicaId, PeerStatus>();
     for (const p of session.getState().peers) statuses.set(p.replica, p.status);
+    let prevLabel = session.getState().label;
+    let prevFork = session.getState().forkedFrom;
     return session.subscribe(() => {
-      const { peers } = session.getState();
+      const st = session.getState();
+      const { peers } = st;
+
+      // Our own letter changed without a fork: it clashed with a newly linked computer's.
+      if (st.label !== prevLabel) {
+        const was = prevLabel;
+        prevLabel = st.label;
+        if (st.forkedFrom === prevFork && hasLabel({ label: was }) && hasLabel(st) && st.rtc.links.some((l) => l.state === "connected")) {
+          toast.push({
+            id: "relabel",
+            title: `This tab is now Tab ${st.label}`,
+            detail: `The other computer already had a Tab ${was}, so this tab took the next free letter. Nothing else changed.`,
+            icon: Laptop,
+            durationMs: 7000,
+          });
+        }
+      }
+      prevFork = st.forkedFrom;
+
+      for (const [pid, p] of links) {
+        const label = settledLinkLabel(session, p.link);
+        if (label) announceLink(p.link, label);
+        else if (!st.rtc.links.some((l) => l.pid === pid)) {
+          clearTimeout(p.timer);
+          links.delete(pid);
+        }
+      }
+
       for (const p of peers) {
         const prev = statuses.get(p.replica);
         statuses.set(p.replica, p.status);
-        if (prev === "left" && p.status !== "left" && hasLabel(p) && !pending.has(p.replica)) {
+        if (prev === "left" && p.status !== "left" && hasLabel(p) && !pending.has(p.replica) && !isLinkedReplica(session, p.replica)) {
           toast.push({ id: `peer-${p.replica}`, title: `Tab ${p.label} is back`, icon: UserPlus, tone: "ok", durationMs: 3500 });
         }
       }
@@ -120,7 +256,7 @@ export function SessionToasts() {
         if (!p || p.status === "left") pending.delete(replica);
         else if (hasLabel(p)) {
           pending.delete(replica);
-          pushJoined(toast, replica, p.label);
+          if (!isLinkedReplica(session, replica)) pushJoined(toast, replica, p.label);
         } else if (now - since > JOIN_LABEL_WAIT_MS) pending.delete(replica);
       }
     });
@@ -149,7 +285,12 @@ export function SessionToasts() {
       case "info":
         toast.push({ title: e.message });
         return;
+      case "link":
+        onLinkEvent(e);
+        return;
       case "peer-joined": {
+        // A computer we just paired with gets its "Connected to Tab B…" toast instead.
+        if (isLinkedReplica(session, e.replica)) return;
         const label = labelOf(session, e.replica);
         if (label) pushJoined(toast, e.replica, label);
         else pendingJoins.current.set(e.replica, Date.now());

@@ -2,20 +2,24 @@
 /**
  * Pane-level shortcuts, bound to the pane root (never window) so /split's panes don't both
  * react. Rendered as the pane's first child so it registers before the canvas/panels: it
- * only claims Escape when it actually has something to close.
+ * only claims Escape when it actually has something to close. While a modal sheet (shortcuts,
+ * "Connect another computer") is open, board shortcuts stay behind it.
  */
 import { useSession } from "@/lib/session/react";
 import { isTypingTarget, usePaneKeydown } from "@/lib/ui/pane";
 import { useUiStore } from "@/lib/ui/store";
 import { useToast } from "@/components/ui/Toast";
+import { usePairingStore } from "./pairing/PairingProvider";
 
 export function PaneHotkeys() {
   const session = useSession();
   const store = useUiStore();
   const toast = useToast();
+  const pairing = usePairingStore();
 
   usePaneKeydown((e) => {
     const ui = store.getState();
+    const pairingOpen = pairing?.getState().open ?? false;
     const mod = e.metaKey || e.ctrlKey;
     const typing = isTypingTarget(e.target);
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
@@ -48,17 +52,28 @@ export function PaneHotkeys() {
       return true;
     }
     if (mod && !e.altKey && key === "z") {
-      if (typing) return false;
+      if (typing || pairingOpen) return false;
       history(e.shiftKey);
       return true;
     }
     if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && key === "y") {
-      if (typing) return false;
+      if (typing || pairingOpen) return false;
       history(true);
       return true;
     }
 
     if (typing || mod || e.altKey) return false;
+
+    if (pairingOpen) {
+      // The dialog handles Escape itself while focus is inside it; this covers the rest.
+      if (key === "Escape") {
+        pairing?.getState().closeDialog();
+        return true;
+      }
+      // Swallow tool keys (Space still presses buttons; arrows/Delete are left alone via
+      // the dialog's data-own-keys).
+      return e.key.length === 1 && e.key !== " ";
+    }
 
     if (ui.showShortcuts) {
       if (key === "Escape" || key === "?") {

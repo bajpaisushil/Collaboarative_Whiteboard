@@ -94,7 +94,20 @@ export async function decodePairing(text: string): Promise<PairingCode> {
     throw new PairingCodeError("The code is incomplete — copy the whole thing and try again.");
   }
   const c = parsed as Partial<PairingCode>;
-  if (c.v !== 1 || (c.k !== "offer" && c.k !== "answer") || typeof c.sdp !== "string" || typeof c.pid !== "string" || typeof c.from !== "string" || typeof c.room !== "string") {
+  const idLike = (v: unknown, max: number) => typeof v === "string" && v.length > 0 && v.length <= max && /^[A-Za-z0-9_-]+$/.test(v);
+  if (
+    c.v !== 1 ||
+    (c.k !== "offer" && c.k !== "answer") ||
+    typeof c.sdp !== "string" ||
+    c.sdp.length > 100_000 ||
+    !idLike(c.pid, 32) ||
+    !idLike(c.from, 64) ||
+    typeof c.room !== "string" ||
+    c.room.length === 0 ||
+    c.room.length > 128 ||
+    typeof c.label !== "string" ||
+    c.label.length > 8
+  ) {
     throw new PairingCodeError("That code isn't a valid Weave invite or reply.");
   }
   return c as PairingCode;

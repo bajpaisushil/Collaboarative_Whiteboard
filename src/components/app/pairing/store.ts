@@ -12,6 +12,9 @@ import { disconnectLink, isDeadLink, mismatchRoom, pairingErrorText } from "./li
 
 export type PairingTrack = "invite" | "join";
 
+/** How this page reaches other computers (`?ice=`): the public STUN default, none (LAN), or custom. */
+export type IceMode = "default" | "none" | "custom";
+
 export interface InviteFlow {
   phase: "idle" | "creating" | "ready";
   /** The link this flow created. */
@@ -38,6 +41,8 @@ export interface JoinFlow {
 }
 
 export interface PairingState {
+  /** Fixed for the page's lifetime; only changes the dialog's wording. */
+  ice: IceMode;
   open: boolean;
   track: PairingTrack;
   invite: InviteFlow;
@@ -72,7 +77,7 @@ export type PairingStore = PairingState & PairingActions;
 export const INVITE_IDLE: InviteFlow = { phase: "idle", pid: null, code: null, error: null, draft: "", completing: false, replyError: null };
 export const JOIN_IDLE: JoinFlow = { phase: "idle", pid: null, reply: null, draft: "", error: null, mismatch: null };
 
-export function createPairingStore(session: WhiteboardSessionApi): StoreApi<PairingStore> {
+export function createPairingStore(session: WhiteboardSessionApi, ice: IceMode = "default"): StoreApi<PairingStore> {
   const linkById = (pid: string | null): RtcLinkInfo | null =>
     pid ? (session.getState().rtc.links.find((l) => l.pid === pid) ?? null) : null;
 
@@ -99,6 +104,7 @@ export function createPairingStore(session: WhiteboardSessionApi): StoreApi<Pair
     };
 
     return {
+      ice,
       open: false,
       track: "invite",
       invite: INVITE_IDLE,
@@ -152,6 +158,8 @@ export function createPairingStore(session: WhiteboardSessionApi): StoreApi<Pair
           patchJoin({ error: "Paste the invite link or code first." });
           return;
         }
+        // Show the spinner right away (an invite link opens the dialog straight into this).
+        patchJoin({ phase: "accepting", error: null, mismatch: null, draft: invite });
         // A reply code pasted into this track by mistake: if it answers this tab's own open
         // invite, just use it there.
         const code = extractPairingCode(invite);
@@ -159,7 +167,11 @@ export function createPairingStore(session: WhiteboardSessionApi): StoreApi<Pair
           const decoded = await decodePairing(code).catch(() => null);
           const mine = decoded?.k === "answer" ? linkById(decoded.pid) : null;
           if (mine && mine.role === "inviter" && mine.state === "waiting-answer") {
-            set((s) => ({ track: "invite", invite: { ...s.invite, pid: mine.pid, phase: "ready", code: mine.code ?? s.invite.code } }));
+            set((s) => ({
+              track: "invite",
+              join: JOIN_IDLE,
+              invite: { ...s.invite, pid: mine.pid, phase: "ready", code: mine.code ?? s.invite.code },
+            }));
             await get().completeInvite(invite);
             return;
           }

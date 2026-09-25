@@ -11,6 +11,7 @@ import { Popover } from "@/components/ui/Popover";
 import { Slider } from "@/components/ui/Slider";
 import { STATUS_WORD, ThreadBadge } from "@/components/ui/ThreadBadge";
 import { formatSkew } from "../format";
+import { peerPlace, useRemoteReplicas } from "./PeerAvatars";
 import { isChaotic, selectChaotic, selectNetwork, selectNamedPeers, selectTraffic } from "../selectors";
 
 export function NetworkPopover() {
@@ -169,6 +170,7 @@ function Traffic() {
 function Links() {
   const peers = useSessionState(selectNamedPeers);
   const shown = peers.filter((p) => p.status !== "left");
+  const remote = useRemoteReplicas();
   return (
     <div className="border-t border-dashed border-line px-4 pb-3.5 pt-3">
       <p className="mb-2 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">Links</p>
@@ -176,28 +178,34 @@ function Links() {
         <p className="text-[12px] text-muted">No other tabs in this room yet.</p>
       ) : (
         <ul className="space-y-1.5">
-          {shown.map((p) => (
-            <li key={p.replica} className="flex items-center gap-2 text-[12px]">
-              <ThreadBadge label={p.label} size="xs" status={p.status} />
-              <span className="font-medium text-ink">Tab {p.label}</span>
-              <span className="text-muted">{STATUS_WORD[p.status]}</span>
-              <span className="ml-auto flex items-center gap-1.5">
-                {p.transportError && (
-                  <span className="max-w-[120px] truncate text-[11px] text-knot" title={p.transportError}>
-                    {p.transportError}
-                  </span>
-                )}
-                <span
-                  className={clsx(
-                    "rounded-full px-1.5 py-px font-mono text-[10px]",
-                    p.transport === "webrtc" ? "bg-[color-mix(in_oklab,var(--thread-d)_16%,transparent)] text-ink" : "bg-panel-2 text-ink-2",
-                  )}
-                >
-                  {p.transport === "webrtc" ? "WebRTC" : "BroadcastChannel"}
+          {shown.map((p) => {
+            const place = peerPlace(p, remote);
+            return (
+              <li key={p.replica} className="flex items-center gap-2 text-[12px]">
+                <ThreadBadge label={p.label} size="xs" status={p.status} />
+                <span className="font-medium text-ink">Tab {p.label}</span>
+                <span className="text-muted">
+                  {STATUS_WORD[p.status]}
+                  {place !== "local" && " · on another computer"}
                 </span>
-              </span>
-            </li>
-          ))}
+                <span className="ml-auto flex items-center gap-1.5">
+                  {p.transportError && (
+                    <span className="max-w-[120px] truncate text-[11px] text-knot" title={p.transportError}>
+                      {p.transportError}
+                    </span>
+                  )}
+                  <span
+                    className={clsx(
+                      "rounded-full px-1.5 py-px font-mono text-[10px]",
+                      p.transport === "webrtc" ? "bg-[color-mix(in_oklab,var(--thread-d)_16%,transparent)] text-ink" : "bg-panel-2 text-ink-2",
+                    )}
+                  >
+                    {p.transport === "webrtc" ? "WebRTC" : place === "remote-lost" ? "link lost" : "BroadcastChannel"}
+                  </span>
+                </span>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

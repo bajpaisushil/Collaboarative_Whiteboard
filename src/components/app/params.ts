@@ -5,6 +5,8 @@
  *   &fresh=1       ignore persisted state (a new tab opened via "Open Tab B"); stripped after use
  *   &ice=none      WebRTC with host candidates only (no STUN) — LAN demos and tests
  *   &ice=<json>    custom ICE servers: a URL-encoded JSON array of RTCIceServer objects
+ *                  (`ice` is also read from the #fragment — invite links carry it there so
+ *                  TURN credentials never reach a server's access logs)
  *                  (or of "stun:…"/"turn:…" strings), e.g. to add a TURN server
  *   #join=W1.…     an invite from another computer: the pairing dialog opens and accepts it
  */
@@ -70,10 +72,17 @@ export function parseIceParam(value: string | null): RTCIceServer[] | undefined 
   return out;
 }
 
-export function parseBoardParams(search: string): BoardParams {
+/** `ice` from the query, or from the fragment (where invite links put it). */
+function readIce(search: string, hash: string): string | undefined {
+  const fromQuery = new URLSearchParams(search).get("ice")?.trim();
+  if (fromQuery) return fromQuery;
+  return new URLSearchParams(hash.replace(/^#/, "")).get("ice")?.trim() || undefined;
+}
+
+export function parseBoardParams(search: string, hash = ""): BoardParams {
   const q = new URLSearchParams(search);
   const fresh = q.get("fresh");
-  const ice = q.get("ice")?.trim() || undefined;
+  const ice = readIce(search, hash);
   const iceServers = parseIceParam(ice ?? null);
   return {
     room: clean(q.get("room"), /^[\w.-]+$/, 64) ?? DEFAULT_ROOM,
@@ -113,24 +122,26 @@ export function stripJoinHash(): void {
   window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${hash ? `#${hash}` : ""}`);
 }
 
-/** Query string for a board link: the room, plus this page's `ice` override if any. */
-function boardQuery(room: string, currentSearch: string): string {
-  const q = new URLSearchParams({ room });
-  const ice = new URLSearchParams(currentSearch).get("ice");
-  if (ice) q.set("ice", ice);
-  return q.toString();
+/**
+ * Fragment for a join link: the code, plus this page's `ice` override if any (so a LAN demo's
+ * `ice=none` carries over). Both live in the fragment, which browsers never send to a server —
+ * so neither pairing codes nor TURN credentials end up in access logs.
+ */
+function joinFragment(code: string, loc: Pick<Location, "search"> & { hash?: string }): string {
+  const f = new URLSearchParams();
+  f.set("join", code);
+  const ice = readIce(loc.search, loc.hash ?? "");
+  if (ice) f.set("ice", ice);
+  // Keep the code readable (URLSearchParams would escape nothing in W1.z.<base64url> anyway).
+  return f.toString();
 }
 
-/**
- * The link another computer opens to accept an invite:
- * `${origin}${pathname}?room=${room}#join=${code}` (plus `&ice=…` when this page has one,
- * so a LAN demo's `?ice=none` carries over).
- */
-export function inviteLink(loc: Pick<Location, "origin" | "pathname" | "search">, room: string, code: string): string {
-  return `${loc.origin}${loc.pathname}?${boardQuery(room, loc.search)}#join=${code}`;
+/** The link another computer opens to accept an invite: `…?room=R#join=<code>[&ice=…]`. */
+export function inviteLink(loc: Pick<Location, "origin" | "pathname" | "search"> & { hash?: string }, room: string, code: string): string {
+  return `${loc.origin}${loc.pathname}?${new URLSearchParams({ room })}#${joinFragment(code, loc)}`;
 }
 
 /** Same-origin path that opens board `room` and accepts `code` there. */
-export function joinPath(loc: Pick<Location, "pathname" | "search">, room: string, code: string): string {
-  return `${loc.pathname}?${boardQuery(room, loc.search)}#join=${code}`;
+export function joinPath(loc: Pick<Location, "pathname" | "search"> & { hash?: string }, room: string, code: string): string {
+  return `${loc.pathname}?${new URLSearchParams({ room })}#${joinFragment(code, loc)}`;
 }

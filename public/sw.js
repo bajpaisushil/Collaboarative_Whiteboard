@@ -110,7 +110,6 @@ function isCacheablePage(response) {
 
 function networkFirstPage(event, url) {
   const key = pageKey(url);
-  let stored = Promise.resolve();
   const network = (async () => {
     let response;
     try {
@@ -118,26 +117,27 @@ function networkFirstPage(event, url) {
     } catch {
       response = undefined;
     }
-    if (!response) response = await fetch(event.request);
-    if (isCacheablePage(response)) {
-      const copy = response.clone();
-      stored = caches.open(PAGES).then((cache) => cache.put(key, copy));
-    }
-    return response;
+    return response || fetch(event.request);
   })();
-  // Keep the worker alive until the fresh copy is stored, even if the cached copy won.
-  event.waitUntil(network.then(() => stored).then(noop, noop));
 
   return (async () => {
     const cache = await caches.open(PAGES);
     const cached = await cache.match(key);
+    let response;
     try {
-      const response = cached ? await withTimeout(network, NAV_TIMEOUT_MS) : await network;
-      // A proxy or tunnel in front of a stopped server answers 502/503/504; prefer our copy.
-      return cached && response.status >= 500 ? cached : response;
+      response = cached ? await withTimeout(network, NAV_TIMEOUT_MS) : await network;
     } catch {
+      // Served the cached copy (slow or no network). Deliberately do NOT store the fresh HTML
+      // when it eventually arrives: its hashed /_next/static files were never loaded, so an
+      // offline start with it would fail. The cached page + its cached assets stay a matching pair.
+      event.waitUntil(network.then(noop, noop));
       return cached || (await cache.match(key)) || offlinePage(url, cache);
     }
+    // A proxy or tunnel in front of a stopped server answers 502/503/504; prefer our copy.
+    if (cached && response.status >= 500) return cached;
+    // This fresh page is what the tab runs now, so the assets it loads get cached alongside it.
+    if (isCacheablePage(response)) event.waitUntil(cache.put(key, response.clone()).catch(noop));
+    return response;
   })();
 }
 
@@ -156,6 +156,9 @@ async function cacheFirst(event, request, revalidate) {
   const hit = await cache.match(request, { ignoreVary: true });
   if (hit) {
     if (revalidate) event.waitUntil(refresh(cache, request).catch(noop));
+    // Re-put on hit: Cache keys are kept in insertion order and `trim` drops the oldest, so this
+    // makes eviction least-recently-*used* — files the current build still loads never age out.
+    else event.waitUntil(cache.put(request, hit.clone()).catch(noop));
     return hit;
   }
   const response = await fetch(request);
@@ -196,7 +199,7 @@ function scheduleTrim() {
   }, 5000);
 }
 
-/** Drop the oldest entries (Cache keys come back in insertion order). */
+/** Drop the least recently used entries (keys come back in insertion order; hits re-put). */
 async function trim(cache, max) {
   const keys = await cache.keys();
   const excess = keys.length - max;

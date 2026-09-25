@@ -1,13 +1,13 @@
 "use client";
 /**
  * Floating top sheet. Full: wordmark · identity · cable switch (hero) · peers · convergence ·
- * knots · mode · undo/redo · open-tab/split · panel · theme · help. Compact (/split panes):
- * identity · cable · peers · knots · undo/redo.
+ * knots · mode · undo/redo · open-tab/split · connect another computer · panel · theme · help.
+ * Compact (/split panes): identity · cable · peers · knots · undo/redo (no pairing there).
  *
  * It adapts to the PANE's width (container queries on the header), not the window's. Labels
  * collapse to icons in priority order as the bar narrows (header width):
- *   < 1500  split-view text, X-ray key cap
- *   < 1380  wordmark text, "Open Tab B" text
+ *   < 1500  split-view text, X-ray key cap, "Connect computer" → "Connect"
+ *   < 1380  wordmark text, "Open Tab B" text, "Connect" text (laptop icon + badge stay)
  *   < 1240  Draw / X-ray labels
  *   < 1170  "You are", convergence verdict text
  *   < 1000  cable sub-line, "Just you"
@@ -15,6 +15,7 @@
  *   <  820  convergence badge, theme toggle
  *   <  700  wordmark
  *   <  650  mode toggle (X still works)
+ *   <  480  help button ("?" still opens the sheet; phones have no keyboard) — room for the laptop
  *   <  460  identity text (letter stays)   ← compact panes in a narrow split
  *   <  400  "Online"/"Offline" text (the plug graphic and aria state stay)
  */
@@ -25,6 +26,7 @@ import { useUi, useUiStore } from "@/lib/ui/store";
 import { IconButton } from "@/components/ui/IconButton";
 import { CableControl } from "./CableSwitch";
 import { ClockTag } from "./ClockTag";
+import { ConnectButton } from "./ConnectButton";
 import { ConvergenceBadge } from "./ConvergenceBadge";
 import { IdentityPill } from "./IdentityPill";
 import { KnotCounter } from "./KnotCounter";
@@ -77,11 +79,14 @@ function FullBar() {
       <span className="flex items-center @max-[920px]:hidden">
         <TabLinks />
       </span>
+      <ConnectButton />
       <PanelToggle />
       <span className="flex @max-[820px]:hidden">
         <ThemeToggle />
       </span>
-      <HelpButton />
+      <span className="flex @max-[480px]:hidden">
+        <HelpButton />
+      </span>
 
       <ClockTag />
     </header>

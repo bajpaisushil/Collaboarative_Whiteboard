@@ -3,15 +3,16 @@
  * Per-pane pairing store ("Connect another computer"), plus invite links: a `#join=W1.…`
  * fragment — captured at load, or pasted into the address bar later (hashchange) — opens
  * the dialog on the join track and accepts it, exactly once, then leaves the address bar
- * clean so a reload doesn't accept it again. Mounted inside ReadyGate, so the session is
- * ready by the time any invite is accepted.
+ * clean so a reload doesn't accept it again. Mounted inside the board's ReadyGate, so the
+ * session is ready by the time any invite is accepted. Full panes only: /split's compact
+ * panes don't offer pairing (usePairingStore() is null there).
  */
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { useStore, type StoreApi } from "zustand";
 import { useSession } from "@/lib/session/react";
 import type { WhiteboardSessionApi } from "@/lib/session/types";
 import { parseJoinHash, stripJoinHash } from "../params";
-import { createPairingStore, type PairingStore } from "./store";
+import { createPairingStore, type IceMode, type PairingStore } from "./store";
 
 const PairingContext = createContext<StoreApi<PairingStore> | null>(null);
 
@@ -26,17 +27,28 @@ function claim(session: WhiteboardSessionApi, code: string): boolean {
   return true;
 }
 
-export function PairingProvider({ joinCode, children }: { joinCode?: string | null; children: ReactNode }) {
+export function PairingProvider({
+  joinCode,
+  ice = "default",
+  children,
+}: {
+  /** Invite code from the page's `#join=` fragment, read before the board mounted. */
+  joinCode?: string | null;
+  ice?: IceMode;
+  children: ReactNode;
+}) {
   const session = useSession();
-  const [store] = useState(() => createPairingStore(session));
+  const [store] = useState(() => createPairingStore(session, ice));
 
   useEffect(() => {
     const take = (code: string | null) => {
+      // Strip first: even if accepting fails, a reload must never accept it again (the
+      // code stays in the join field, so "Join" can retry it).
       stripJoinHash();
-      if (!code || !claim(session, code)) return;
+      if (!code) return;
       const s = store.getState();
       s.openDialog("join");
-      void s.acceptInvite(code);
+      if (claim(session, code)) void s.acceptInvite(code);
     };
     take(joinCode ?? null);
     const onHash = () => {
@@ -55,9 +67,14 @@ export function usePairingStore(): StoreApi<PairingStore> | null {
   return useContext(PairingContext);
 }
 
+/** The pairing store where it must exist (inside the pairing dialog). */
+export function useRequiredPairingStore(): StoreApi<PairingStore> {
+  const store = useContext(PairingContext);
+  if (!store) throw new Error("Pairing UI must be rendered inside <PairingProvider>");
+  return store;
+}
+
 /** Select from the pairing store (throws outside a PairingProvider). */
 export function usePairing<T>(selector: (s: PairingStore) => T): T {
-  const store = useContext(PairingContext);
-  if (!store) throw new Error("usePairing must be used inside <PairingProvider>");
-  return useStore(store, selector);
+  return useStore(useRequiredPairingStore(), selector);
 }

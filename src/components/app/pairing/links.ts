@@ -9,6 +9,8 @@ import { hasLabel } from "../selectors";
 
 export type LinkState = RtcLinkInfo["state"];
 
+export const PAIRING_TITLE = "Connect another computer";
+
 /** Links that are finished: they only offer "Re-pair" / remove. */
 export const isDeadLink = (l: Pick<RtcLinkInfo, "state">): boolean => l.state === "failed" || l.state === "closed";
 
