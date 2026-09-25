@@ -110,6 +110,7 @@ function isCacheablePage(response) {
 
 function networkFirstPage(event, url) {
   const key = pageKey(url);
+  let stored = Promise.resolve();
   const network = (async () => {
     let response;
     try {
@@ -120,13 +121,12 @@ function networkFirstPage(event, url) {
     if (!response) response = await fetch(event.request);
     if (isCacheablePage(response)) {
       const copy = response.clone();
-      const cache = await caches.open(PAGES);
-      await cache.put(key, copy);
+      stored = caches.open(PAGES).then((cache) => cache.put(key, copy));
     }
     return response;
   })();
   // Keep the worker alive until the fresh copy is stored, even if the cached copy won.
-  event.waitUntil(network.then(noop, noop));
+  event.waitUntil(network.then(() => stored).then(noop, noop));
 
   return (async () => {
     const cache = await caches.open(PAGES);
