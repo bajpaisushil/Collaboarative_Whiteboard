@@ -189,9 +189,20 @@ describe("why panel smoke", () => {
     await render(<Pane session={fakeSession(a)} store={store}><Explainer conflictId={c.id} /></Pane>);
     const use = Array.from(container.querySelectorAll("button")).find((x) => x.textContent?.startsWith("Use "));
     expect(use).toBeTruthy();
+    const picked = use!.textContent!.replace(/^Use /, ""); // "A's peach"
     await act(async () => use!.click());
     expect(a.getView().conflicts.find((x) => x.id === c.id)?.status).toBe("superseded");
     expect(container.textContent).toContain("Later,");
+    // The explainer now agrees with the board: it asks about the picked value, not the old winner.
+    const header = container.querySelector("article header")!;
+    const question = header.querySelector("h2")!.textContent!;
+    expect(question).not.toBe(a.explain(c.id)!.question);
+    expect(question).toContain(`picked ${picked.replace("'", "’")} by hand`);
+    expect(header.textContent).toContain("won the merge");
+    expect(header.textContent).toContain(`${picked.replace("'", "’")} is on the board now`);
+    expect(header.textContent).not.toContain("is kept in history");
+    // The picked side's card says it lost the merge and is on the board — not "kept in history".
+    expect(container.textContent).toContain("lost the merge");
     expect(errors).toEqual([]);
   });
 

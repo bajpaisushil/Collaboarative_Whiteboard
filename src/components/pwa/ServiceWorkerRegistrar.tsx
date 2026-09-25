@@ -11,11 +11,20 @@
  * - The first visit loads before the worker exists, so the worker never sees those
  *   requests. Once it is active we send it this page's URL and the same-origin files the
  *   page already loaded; it caches whatever it is missing.
+ * - Files still downloading when the worker takes over slip through both nets: they don't
+ *   pass through its fetch handler, and their Resource Timing entry only appears once they
+ *   finish — after that first list was sent. (The board's biggest chunk, the ssr:false
+ *   BoardApp import, is requested right at `load`, exactly when registration starts.) So for a
+ *   while after each warm-up we keep watching Resource Timing and send late arrivals too.
  */
 import { useEffect } from "react";
 
 export const SW_URL = "/sw.js";
 const WARM_MESSAGE = "weave:warm";
+/** Keep reporting late-finishing files this long after a warm-up. */
+export const WARM_WATCH_MS = 30_000;
+/** Batch late arrivals (a burst of chunks → one message). */
+const WARM_BATCH_MS = 250;
 
 export function ServiceWorkerRegistrar() {
   useEffect(() => {
@@ -26,7 +35,13 @@ export function ServiceWorkerRegistrar() {
     if (!canUseServiceWorker()) return;
 
     let cancelled = false;
-    const onControllerChange = () => warmUp();
+    let stopWatching: (() => void) | null = null;
+    const warm = () => {
+      if (cancelled) return;
+      stopWatching?.();
+      stopWatching = warmUp();
+    };
+    const onControllerChange = () => warm();
     const start = () => {
       if (cancelled) return;
       void registerWorker();
@@ -41,7 +56,7 @@ export function ServiceWorkerRegistrar() {
         navigator.serviceWorker.addEventListener("controllerchange", onControllerChange);
         if (!controlledAtStart) {
           await navigator.serviceWorker.ready;
-          if (!cancelled) warmUp();
+          warm();
         }
       } catch (err) {
         console.warn("[weave] offline support unavailable:", err);
@@ -54,6 +69,7 @@ export function ServiceWorkerRegistrar() {
 
     return () => {
       cancelled = true;
+      stopWatching?.();
       window.removeEventListener("load", start);
       navigator.serviceWorker.removeEventListener("controllerchange", onControllerChange);
     };
@@ -81,12 +97,68 @@ function loadedAssets(): string[] {
   }
 }
 
-function warmUp(): void {
+function postWarm(message: { page?: string; assets: string[] }): void {
   navigator.serviceWorker.ready
     .then((reg) => {
-      reg.active?.postMessage({ type: WARM_MESSAGE, page: window.location.href, assets: loadedAssets() });
+      reg.active?.postMessage({ type: WARM_MESSAGE, ...message });
     })
     .catch(() => undefined);
+}
+
+/**
+ * Hand the active worker this page and everything it loaded so far, then keep sending files
+ * that finish loading over the next WARM_WATCH_MS (see the file comment). Returns a stop
+ * function (idempotent).
+ */
+function warmUp(): () => void {
+  const origin = window.location.origin;
+  const initial = loadedAssets();
+  const sent = new Set(initial);
+  postWarm({ page: window.location.href, assets: initial });
+
+  let pending: string[] = [];
+  let batch: ReturnType<typeof setTimeout> | null = null;
+  const flush = () => {
+    batch = null;
+    if (pending.length === 0) return;
+    const assets = pending;
+    pending = [];
+    postWarm({ assets });
+  };
+
+  let observer: PerformanceObserver | null = null;
+  if (typeof PerformanceObserver !== "undefined") {
+    try {
+      observer = new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) {
+          const name = e.name;
+          if (!name.startsWith(`${origin}/`) || sent.has(name)) continue;
+          // workerStart > 0: it went through the worker's fetch handler, which cached it.
+          if ((e as PerformanceResourceTiming).workerStart > 0) continue;
+          sent.add(name);
+          pending.push(name);
+        }
+        if (pending.length > 0 && batch === null) batch = setTimeout(flush, WARM_BATCH_MS);
+      });
+      observer.observe({ type: "resource", buffered: true });
+    } catch {
+      observer = null; // no Resource Timing observer here: the first list is all we can send
+    }
+  }
+
+  let stopped = false;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    clearTimeout(deadline);
+    observer?.disconnect();
+    if (batch !== null) {
+      clearTimeout(batch);
+      flush();
+    }
+  };
+  const deadline = setTimeout(stop, WARM_WATCH_MS);
+  return stop;
 }
 
 /** Dev only: drop a Weave worker (and its caches) left by a production run on this origin. */

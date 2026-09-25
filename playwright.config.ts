@@ -21,7 +21,19 @@ export default defineConfig({
     screenshot: "only-on-failure",
     viewport: { width: 1440, height: 900 },
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } }],
+  projects: [
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1440, height: 900 },
+        // two-computers.spec pairs two isolated contexts over WebRTC with `?ice=none` (host
+        // candidates only). Chromium hides host IPs behind mDNS names by default, which some
+        // headless/container setups can't resolve; plain host candidates keep it deterministic.
+        launchOptions: { args: ["--disable-features=WebRtcHideLocalIpsWithMdns"] },
+      },
+    },
+  ],
   webServer: {
     command: `npx next start -p ${PORT}`,
     url: `http://localhost:${PORT}`,

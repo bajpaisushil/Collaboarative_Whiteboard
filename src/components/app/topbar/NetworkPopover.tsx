@@ -28,7 +28,7 @@ export function NetworkPopover() {
           aria-label={chaotic ? "Network lab (network chaos is on)" : "Network lab"}
           title="Network lab — latency, drops, duplicates, clock drift"
           className={clsx(
-            "relative grid h-8 w-7 place-items-center rounded-r-full pr-0.5 text-ink-2 hover:text-ink",
+            "relative grid h-8 w-7 place-items-center rounded-r-full pr-0.5 text-ink-2 hover:text-ink @max-[440px]:w-6",
             open && "text-ink",
           )}
         >

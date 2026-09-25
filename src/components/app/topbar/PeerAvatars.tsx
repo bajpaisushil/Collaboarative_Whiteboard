@@ -3,7 +3,8 @@
  * Other tabs in the room: letter in thread colour + status dot (shape-coded). Hover/focus
  * explains the link and how far behind they are; click previews the board as they last saw it.
  * A tab on another computer (paired over WebRTC) carries a small laptop mark and reads
- * "on another computer · WebRTC".
+ * "on another computer · WebRTC" — also the other computer's other tabs, which we hear through
+ * the paired tab ("through Tab A").
  */
 import clsx from "clsx";
 import { CircleCheck, Laptop, TriangleAlert, Users } from "lucide-react";
@@ -30,9 +31,9 @@ const STATUS_NOTE: Record<PeerStatus, string | null> = {
 /** Where a peer is: this computer (BroadcastChannel) or another one (WebRTC link, live or lost). */
 export type PeerPlace = "local" | "remote" | "remote-lost";
 
-export function peerPlace(peer: PeerInfo, remoteReplicas: ReadonlySet<string>): PeerPlace {
+export function peerPlace(peer: Pick<PeerInfo, "transport" | "replica"> & { remote?: boolean }, remoteReplicas: ReadonlySet<string>): PeerPlace {
   if (peer.transport === "webrtc") return "remote";
-  return remoteReplicas.has(peer.replica) ? "remote-lost" : "local";
+  return peer.remote || remoteReplicas.has(peer.replica) ? "remote-lost" : "local";
 }
 
 export const PLACE_TEXT: Record<PeerPlace, string> = {
@@ -77,7 +78,7 @@ export function PeerAvatars({ compact = false }: { compact?: boolean }) {
           tabIndex={0}
           role="img"
           aria-label="No other tabs in this room"
-          className="flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-dashed border-line-2 px-2.5 text-[12px] text-muted"
+          className="flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-dashed border-line-2 px-2.5 text-[12px] text-muted @max-[440px]:px-2"
         >
           <Users aria-hidden className="size-3.5" />
           <span className={compact ? "sr-only" : "@max-[1000px]:hidden"}>Just you</span>
@@ -90,7 +91,7 @@ export function PeerAvatars({ compact = false }: { compact?: boolean }) {
     <ul aria-label="Other tabs" className="flex shrink-0 items-center -space-x-1.5">
       {shown.map((p) => (
         <li key={p.replica}>
-          <PeerAvatar peer={p} place={peerPlace(p, remote)} />
+          <PeerAvatar peer={p} place={peerPlace(p, remote)} via={p.relay ? (peers.find((q) => q.replica === p.relay)?.label ?? null) : null} />
         </li>
       ))}
       {extra > 0 && (
@@ -104,7 +105,7 @@ export function PeerAvatars({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function PeerAvatar({ peer, place }: { peer: PeerInfo; place: PeerPlace }) {
+function PeerAvatar({ peer, place, via }: { peer: PeerInfo; place: PeerPlace; via: string | null }) {
   const store = useUiStore();
   const L = peer.label;
   const gone = peer.status === "left";
@@ -116,7 +117,10 @@ function PeerAvatar({ peer, place }: { peer: PeerInfo; place: PeerPlace }) {
   const tip = (
     <TipBody title={`Tab ${L} · ${STATUS_WORD[peer.status]}`}>
       <span className="block">
-        <span className={clsx("font-medium", place === "local" ? "text-ink-2" : "text-ink")}>{PLACE_TEXT[place]}</span>
+        <span className={clsx("font-medium", place === "local" ? "text-ink-2" : "text-ink")}>
+          {PLACE_TEXT[place]}
+          {via && place === "remote" && ` · through Tab ${via}`}
+        </span>
         {peer.transportError && <span className="block text-knot">{peer.transportError}</span>}
       </span>
       {!gone && (

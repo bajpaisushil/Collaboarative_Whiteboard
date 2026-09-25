@@ -21,11 +21,30 @@ export const selectConnectedLinkCount = (s: SessionState) => {
   for (const l of s.rtc.links) if (l.state === "connected") n++;
   return n;
 };
-/** Replicas reached (now or earlier) over a WebRTC link, as a stable key ("r1,r2"). */
+/**
+ * Replicas reached (now or earlier) over a WebRTC link, as a stable key ("r1,r2") — every
+ * identity a link's other end spoke as, so a tab that forked there still reads as remote.
+ */
 export const selectRemoteReplicasKey = (s: SessionState): string => {
-  const ids: string[] = [];
-  for (const l of s.rtc.links) if (l.remoteReplica) ids.push(l.remoteReplica);
-  return ids.sort().join(",");
+  const ids = new Set<string>();
+  for (const l of s.rtc.links) {
+    if (l.remoteReplica) ids.add(l.remoteReplica);
+    for (const r of l.remoteReplicas) ids.add(r);
+  }
+  return [...ids].sort().join(",");
+};
+
+/**
+ * The letter of a tab on this computer that links it to another one (a "bridge"), when this
+ * tab reaches the other computer only through it; null otherwise.
+ */
+export const selectBridgeLabel = (s: SessionState): string | null => {
+  for (const p of s.peers) {
+    if (!p.remote || !p.relay || p.transport !== "webrtc" || (p.status !== "online" && p.status !== "idle")) continue;
+    const bridge = s.peers.find((q) => q.replica === p.relay);
+    if (bridge && !bridge.remote && hasLabel(bridge)) return bridge.label;
+  }
+  return null;
 };
 
 /**

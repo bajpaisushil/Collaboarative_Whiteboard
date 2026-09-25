@@ -80,3 +80,59 @@ test("split view: a scripted scene ends with its explained knot in the seam", as
   await expect(page.getByText(/Same result/).first()).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test("narrow windows: the top bar fits without overlaps, and the dock's style chip stays reachable", async ({ browser }) => {
+  test.setTimeout(120_000);
+  for (const [w, h] of [
+    [420, 820],
+    [390, 800],
+    [375, 740],
+    [360, 640],
+  ] as const) {
+    const context = await browser.newContext({ viewport: { width: w, height: h } });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(String(e)));
+    const room = `narrow-${w}-${Date.now().toString(36)}`;
+    try {
+      await page.goto(`/?room=${room}`);
+      await expect.poll(() => session(page, room).ready(), { timeout: 20_000 }).toBe(true);
+      const box = async (sel: string) => {
+        const b = await page.locator(sel).first().boundingBox();
+        if (!b) throw new Error(`${w}px: ${sel} is not visible`);
+        return { left: b.x, right: b.x + b.width };
+      };
+      const measure = async () => ({
+        header: await box('header[aria-label="Board controls"]'),
+        network: await box('button[aria-label^="Network lab"]'),
+        peers: await box('[aria-label="No other tabs in this room"]'),
+        knots: await box('button[aria-label$=". Why panel"]'),
+        connect: await box("[data-connect-button]"),
+        style: await box('button[aria-label^="Style:"]'),
+      });
+      const m = await measure();
+      const where = `${w}px: ${JSON.stringify(m)}`;
+      // Everything inside the bar, the bar inside the window, nothing on top of its neighbour.
+      expect(m.header.left, where).toBeGreaterThanOrEqual(0);
+      expect(m.header.right, where).toBeLessThanOrEqual(w);
+      expect(m.connect.right, where).toBeLessThanOrEqual(m.header.right);
+      expect(m.network.right, where).toBeLessThanOrEqual(m.peers.left);
+      expect(m.peers.right, where).toBeLessThanOrEqual(m.knots.left);
+      expect(m.knots.right, where).toBeLessThanOrEqual(m.connect.left);
+      // The style chip (colours) is always on screen, whatever the tools do.
+      expect(m.style.left, where).toBeGreaterThanOrEqual(0);
+      expect(m.style.right, where).toBeLessThanOrEqual(w);
+
+      // Opening the pairing dialog moves focus around; the board must not shift sideways.
+      await page.locator("[data-connect-button]").click();
+      await page.getByRole("dialog").getByRole("button", { name: "Create invite" }).click();
+      await expect(page.getByRole("dialog").getByLabel("Invite link")).toBeVisible({ timeout: 20_000 });
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("dialog")).toBeHidden();
+      expect((await box('header[aria-label="Board controls"]')).left, `${w}px after the dialog`).toBe(m.header.left);
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }
+});

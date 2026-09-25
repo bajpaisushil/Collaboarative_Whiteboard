@@ -16,9 +16,35 @@ interface Envelope {
   nonce: string;
   /** Unicast target; absent = broadcast to every peer in the room. */
   to?: ReplicaId;
+  /**
+   * Set only on a copy forwarded by a *bridge* tab (one with a WebRTC link): presence-class
+   * messages (hello / heartbeat / bye) are relayed between its paths so tabs that reach each
+   * other only through it — the other computer's other tabs — still see each other (labels,
+   * status, clocks). A tab never sets this on messages it authors.
+   */
+  relay?: RelayInfo;
 }
 
-export interface HelloMsg extends Envelope {
+export interface RelayInfo {
+  /** The tab that forwarded this copy. */
+  by: ReplicaId;
+  /** How many tabs forwarded it so far (1 = one bridge in between). */
+  hops: number;
+  /** The message crossed a WebRTC link on its way (its author is on another computer). */
+  far: boolean;
+  /**
+   * Not the author speaking: the relaying tab lost its path to the author (its link closed),
+   * so tabs that only reach the author through it should stop showing it as online.
+   */
+  lost?: boolean;
+}
+
+/** hello / heartbeat / bye: per-sender counter, so a bridge forwards each message once. */
+interface Beat {
+  beat?: number;
+}
+
+export interface HelloMsg extends Envelope, Beat {
   t: "hello";
   label: string;
   vc: VectorClock;
@@ -42,7 +68,7 @@ export interface SyncReqMsg extends Envelope {
   vc: VectorClock;
 }
 
-export interface HeartbeatMsg extends Envelope {
+export interface HeartbeatMsg extends Envelope, Beat {
   t: "heartbeat";
   label: string;
   vc: VectorClock;
@@ -50,6 +76,8 @@ export interface HeartbeatMsg extends Envelope {
   rtc: boolean;
   /** Hidden tabs are throttled by the browser: show them as idle, not gone. */
   visible: boolean;
+  /** Last word before the sender's cable is pulled: show it unreachable now, not in 5 s. */
+  offline?: boolean;
 }
 
 export interface PresenceDrawing {
@@ -80,7 +108,7 @@ export interface PresenceMsg extends Envelope {
   state: PresenceState;
 }
 
-export interface ByeMsg extends Envelope {
+export interface ByeMsg extends Envelope, Beat {
   t: "bye";
 }
 
@@ -98,10 +126,15 @@ export type SyncMessageType = SyncMessage["t"];
 export interface Transport {
   readonly kind: LinkTransport | "memory";
   send(msg: SyncMessage): void;
-  /** `via` = which kind of link delivered the message (for per-peer transport badges). */
-  onMessage(handler: (msg: SyncMessage, via?: LinkTransport) => void): () => void;
+  /**
+   * `via` = which kind of link delivered the message (for per-peer transport badges);
+   * `path` = which exact path (LinkRouter: "base" or a WebRTC link's pairing id).
+   */
+  onMessage(handler: MessageHandler): () => void;
   close(): void;
 }
+
+export type MessageHandler = (msg: SyncMessage, via?: LinkTransport, path?: string) => void;
 
 export interface NetworkConditions {
   online: boolean;

@@ -27,8 +27,12 @@ export interface RtcLinkInfo {
   /** The code this side must hand over: the invite (inviter) or the reply (invitee). */
   code: string | null;
   remoteReplica: ReplicaId | null;
+  /** Every identity the other end has spoken as (a fork there leaves the old one behind). */
+  remoteReplicas: ReplicaId[];
   remoteLabel: string | null;
   error: string | null;
+  /** The other side closed the link on purpose ("Disconnect"), rather than crashing or reloading. */
+  remoteClosed: boolean;
   createdAt: number;
 }
 
@@ -43,8 +47,13 @@ export interface PeerInfo {
   lastSeen: number;
   vc: VectorClock;
   stateHash: string;
+  /** How we reach it right now: "webrtc" if the path crosses a live WebRTC link. */
   transport: LinkTransport;
   transportError?: string;
+  /** On another computer (heard over a WebRTC link, or relayed across one) — even once that link is gone. */
+  remote: boolean;
+  /** Heard only through this bridge tab's relay (it isn't paired with us or on our BroadcastChannel). */
+  relay: ReplicaId | null;
   /** Same vc and same state hash as us. */
   converged: boolean;
   /** Same vc but different hash — should never happen; shown as an alarm. */

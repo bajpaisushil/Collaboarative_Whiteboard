@@ -11,6 +11,13 @@
  * Messages are JSON strings; anything larger than a safe SCTP message is chunked (never
  * splitting a UTF-16 surrogate pair — DataChannels carry UTF-8, so a lone surrogate would be
  * replaced with U+FFFD and corrupt the op) and reassembled. Sending applies backpressure.
+ *
+ * Frames: "m<json>" one message, "c<id>|<i>|<n>|<part>" one chunk, "x<json>" link control
+ * (today only "the other side disconnected on purpose", sent just before a deliberate close).
+ *
+ * Reply-code lifetime: the invitee is the DTLS client, and browsers give up retransmitting its
+ * handshake after a few minutes if the inviter never answers (Chromium: ~222 s) — even though
+ * nothing on our side times out. So a reply code is honestly usable for about 3 minutes.
  */
 import type { ReplicaId } from "../crdt/types";
 import type { SyncMessage } from "./protocol";
@@ -26,13 +33,27 @@ export interface RtcOptions {
   gatherTimeoutMs?: number;
   /** Inviter: give up if the link isn't up this long after the reply code is applied. */
   connectTimeoutMs?: number;
-  /** Invitee: how long a reply code stays usable (the inviter pastes it by hand, maybe much later). */
+  /**
+   * Invitee: how long a reply code stays usable (the inviter pastes it by hand). Keep it below
+   * the browser's own DTLS handshake give-up (~222 s in Chromium), so we fail first, clearly.
+   */
   replyTtlMs?: number;
   /** Give up on a link that stays "disconnected" (ICE lost) this long. */
   disconnectTimeoutMs?: number;
 }
 
 export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+
+/** How long an invitee's reply code stays usable (see the file comment). */
+export const REPLY_TTL_MS = 3 * 60_000;
+
+export const REPLY_EXPIRED =
+  "Your reply code expired — they have about 3 minutes to paste it. Make a new reply code and send it again.";
+const REPLY_UNUSABLE =
+  "Your reply code expired or the computers couldn’t reach each other. Make a new reply code and send it again.";
+const INVITER_UNREACHABLE =
+  "Couldn’t reach the other computer. If their reply code was more than 3 minutes old it had expired — ask them for a new one. Strict networks may need a TURN server.";
+const LOST = "The connection to the other computer was lost.";
 
 const CHUNK = 16_000;
 const HIGH_WATER = 4 * 1024 * 1024;
@@ -101,8 +122,14 @@ export class RtcLink {
   code: string | null = null;
   /** The replica on the other end (updated from its messages, so it follows a remote fork). */
   remoteReplica: ReplicaId | null = null;
+  /** Every identity the other end has spoken as (a fork there leaves the old id behind). */
+  readonly remoteReplicas = new Set<ReplicaId>();
   remoteLabel: string | null = null;
   error: string | null = null;
+  /** The other side closed this link on purpose (its "Disconnect"), not a crash or reload. */
+  remoteClosed = false;
+  /** Chunks received so far (progress on large messages, which only count once complete). */
+  rxChunks = 0;
   readonly createdAt = Date.now();
 
   private pc: RTCPeerConnection;
@@ -115,6 +142,7 @@ export class RtcLink {
   private partial = new Map<string, string[]>();
   private chunkSeq = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private wasConnected = false;
   private readonly opts: RtcOptions;
 
   private constructor(role: "inviter" | "invitee", pid: string, opts: RtcOptions) {
@@ -147,7 +175,7 @@ export class RtcLink {
   /** Invitee: consume an offer code and produce the answer code. */
   static async accept(offer: PairingOffer, me: RtcIdentity, opts: RtcOptions = {}): Promise<RtcLink> {
     const link = new RtcLink("invitee", offer.pid, opts);
-    link.remoteReplica = offer.from;
+    link.setRemote(offer.from);
     link.remoteLabel = offer.label;
     link.pc.addEventListener("datachannel", (e) => link.attach(e.channel));
     try {
@@ -161,8 +189,9 @@ export class RtcLink {
       throw e instanceof PairingCodeError ? e : new PairingCodeError("That invite couldn't be used — ask for a fresh one.");
     }
     link.setState("connecting");
-    // The inviter pastes our reply by hand, possibly minutes later: wait patiently.
-    link.armTimer(opts.replyTtlMs ?? 15 * 60_000, "The reply code expired before it was used — make a new invite.");
+    // The inviter pastes our reply by hand, possibly minutes later: wait — but only as long as
+    // the browser itself will (see the file comment), so the message is ours and accurate.
+    link.armTimer(opts.replyTtlMs ?? REPLY_TTL_MS, REPLY_EXPIRED);
     return link;
   }
 
@@ -173,16 +202,21 @@ export class RtcLink {
     if (answer.k !== "answer") throw new PairingCodeError("That's an invite, not a reply. Paste the code the other computer showed after opening your invite.");
     if (answer.pid !== this.pid) throw new PairingCodeError("That reply belongs to a different invite.");
     if (this.state !== "waiting-answer") throw new PairingCodeError("This invite was already used.");
-    this.remoteReplica = answer.from;
+    this.setRemote(answer.from);
     this.remoteLabel = answer.label;
     this.setState("connecting");
-    this.armTimer(this.opts.connectTimeoutMs ?? 30_000, "Couldn't reach the other computer. Strict networks may need a TURN server.");
+    this.armTimer(this.opts.connectTimeoutMs ?? 30_000, INVITER_UNREACHABLE);
     try {
       await this.pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
     } catch {
       this.fail("That reply code couldn't be used — it may be damaged or from an older invite.");
       throw new PairingCodeError("That reply code couldn't be used — it may be damaged or from an older invite.");
     }
+  }
+
+  private setRemote(replica: ReplicaId): void {
+    this.remoteReplica = replica;
+    this.remoteReplicas.add(replica);
   }
 
   private armTimer(ms: number, message: string): void {
@@ -225,8 +259,8 @@ export class RtcLink {
     } else if (s === "disconnected" && this.state === "connected") {
       // ICE lost the path; browsers often recover within seconds. Don't wait forever.
       this.setState("disconnected");
-      this.armTimer(this.opts.disconnectTimeoutMs ?? 30_000, "The connection to the other computer was lost.");
-    } else if (s === "failed") this.fail("The connection to the other computer was lost.");
+      this.armTimer(this.opts.disconnectTimeoutMs ?? 30_000, LOST);
+    } else if (s === "failed") this.fail(this.wasConnected ? LOST : this.role === "invitee" ? REPLY_UNUSABLE : INVITER_UNREACHABLE);
     else if (s === "closed") this.close();
   };
 
@@ -242,6 +276,7 @@ export class RtcLink {
     // Terminal states are final: no "failed" after "closed", nothing after either.
     if (this.state === "closed" || this.state === "failed") return;
     this.state = s;
+    if (s === "connected") this.wasConnected = true;
     for (const h of [...this.stateHandlers]) h(this);
   }
 
@@ -310,7 +345,12 @@ export class RtcLink {
     if (typeof data !== "string" || data.length === 0) return;
     let json: string | null = null;
     if (data[0] === "m") json = data.slice(1);
-    else if (data[0] === "c") {
+    else if (data[0] === "x") {
+      // Link control: the other side is closing this link on purpose.
+      this.remoteClosed = true;
+      this.close();
+      return;
+    } else if (data[0] === "c") {
       const a = data.indexOf("|"),
         b = data.indexOf("|", a + 1),
         c = data.indexOf("|", b + 1);
@@ -325,6 +365,7 @@ export class RtcLink {
         this.partial.set(id, (parts = new Array<string>(n)));
       }
       if (parts.length !== n) return;
+      if (parts[i] === undefined) this.rxChunks++;
       parts[i] = data.slice(c + 1);
       for (let k = 0; k < n; k++) if (parts[k] === undefined) return;
       this.partial.delete(id);
@@ -338,11 +379,33 @@ export class RtcLink {
       return;
     }
     if (!msg || typeof msg !== "object" || typeof (msg as { t?: unknown }).t !== "string") return;
-    if (typeof msg.from === "string" && msg.from.length <= 64) this.remoteReplica = msg.from;
+    // Only the paired tab's *own* messages say who is on the other end: a relayed copy of
+    // another tab's hello (see LinkRouter / session relaying) must not rename the link.
+    if (typeof msg.from === "string" && msg.from.length <= 64 && msg.relay === undefined) this.setRemote(msg.from);
     for (const h of [...this.handlers]) h(msg);
   }
 
-  close(): void {
+  /**
+   * Close on purpose, telling the other side first so it can say "Tab A disconnected" instead
+   * of guessing at a crash or reload. The notice goes out on the reliable channel, which a
+   * graceful channel close drains; the connection itself is torn down a moment later.
+   */
+  disconnect(): void {
+    const dc = this.dc;
+    if (this.state !== "closed" && this.state !== "failed" && dc?.readyState === "open") {
+      try {
+        dc.send("x" + JSON.stringify({ t: "disconnect" }));
+        this.close(600);
+        return;
+      } catch {
+        /* closing anyway */
+      }
+    }
+    this.close();
+  }
+
+  /** Release everything. `lingerMs`: close the channels now but the connection a bit later. */
+  close(lingerMs = 0): void {
     this.clearTimer();
     for (const ch of [this.dc, this.fast]) {
       try {
@@ -351,11 +414,16 @@ export class RtcLink {
         /* already closed */
       }
     }
-    try {
-      this.pc.close();
-    } catch {
-      /* already closed */
-    }
+    const pc = this.pc;
+    const closePc = () => {
+      try {
+        pc.close();
+      } catch {
+        /* already closed */
+      }
+    };
+    if (lingerMs > 0 && this.state !== "closed") setTimeout(closePc, lingerMs);
+    else closePc();
     this.outbox = [];
     this.outboxBytes = 0;
     this.partial.clear();

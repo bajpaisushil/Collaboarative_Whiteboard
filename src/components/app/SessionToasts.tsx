@@ -12,15 +12,19 @@
  * - Two computers often both start as Tab A; right after pairing one of them re-picks. So a
  *   link's "connected" toast waits (briefly) until the other side's letter is settled, and
  *   replaces the plain "joined" toast for that tab.
+ * - WebRTC links end with a reload. Full panes remember their links in sessionStorage, so the
+ *   reloaded page says its link ended instead of silently showing "Just you".
  */
 import { GitFork, HardDriveDownload, Laptop, Redo2, Undo2, Unplug, UserMinus, UserPlus } from "lucide-react";
 import { useEffect, useEffectEvent, useRef } from "react";
 import type { ReplicaId, UndoResult, UndoSkip } from "@/lib/crdt/types";
 import { propsNoun } from "@/lib/crdt/describe";
 import type { PeerStatus, RtcLinkInfo, SessionEvent, WhiteboardSessionApi } from "@/lib/session/types";
+import { safeSessionStorage } from "@/lib/session/persistence";
 import { useSession, useSessionEvent } from "@/lib/session/react";
 import { useToast, type ToastApi, type ToastOptions } from "@/components/ui/Toast";
 import { consumeUserClosed, remoteLabelIn, remoteName } from "./pairing/links";
+import { linksToRemember, reloadNotice, rememberLinks, takeRememberedLinks } from "./pairing/linkMemory";
 import { usePairingStore } from "./pairing/PairingProvider";
 import { hasLabel, labelOf } from "./selectors";
 
@@ -81,7 +85,7 @@ function pushFork(toast: ToastApi, label: string): void {
 
 /** A replica we reach (or reached) over a WebRTC link: its link toasts replace "joined". */
 function isLinkedReplica(session: WhiteboardSessionApi, replica: ReplicaId): boolean {
-  return session.getState().rtc.links.some((l) => l.remoteReplica === replica);
+  return session.getState().rtc.links.some((l) => l.remoteReplica === replica || l.remoteReplicas.includes(replica));
 }
 
 /**
@@ -154,6 +158,18 @@ export function SessionToasts() {
     pendingLinks.current.delete(link.pid);
     const name = remoteName(remoteLabelIn(session.getState(), link), "the other computer");
     if (change === "lost") {
+      if (link.remoteClosed) {
+        // They pressed "Disconnect" on their computer: nothing is broken.
+        toast.push({
+          id: `link-${link.pid}`,
+          title: `${name.charAt(0).toUpperCase()}${name.slice(1)} disconnected`,
+          detail: "They closed the link on their computer. Your edits keep working here — pair again any time to sync.",
+          icon: Unplug,
+          durationMs: 7000,
+          action: repairAction(link),
+        });
+        return;
+      }
       if (consumeUserClosed(session, link.pid)) {
         toast.push({
           id: `link-${link.pid}`,
@@ -194,6 +210,37 @@ export function SessionToasts() {
       pending.clear();
     };
   }, []);
+
+  // Links a reload ended (full panes only — /split's compact panes can't pair), then keep
+  // remembering this page's links for the next reload.
+  useEffect(() => {
+    if (!pairing) return;
+    const storage = safeSessionStorage();
+    const { room, pane, forkedFrom } = session.getState();
+    const before = takeRememberedLinks(storage, room, pane);
+    const notice = forkedFrom ? null : reloadNotice(before); // a duplicated tab never had them
+    if (notice) {
+      toast.push({
+        id: "links-reloaded",
+        title: notice.title,
+        detail: notice.detail,
+        tone: "warn",
+        icon: Laptop,
+        durationMs: 12_000,
+        action: { label: "Re-pair", onClick: () => pairing.getState().openDialog("invite") },
+      });
+    }
+    let last = "";
+    const save = () => {
+      const links = linksToRemember(session.getState());
+      const json = JSON.stringify(links);
+      if (json === last) return;
+      last = json;
+      rememberLinks(storage, room, pane, links);
+    };
+    save();
+    return session.subscribe(save);
+  }, [session, toast, pairing]);
 
   // A fork that happened before the board mounted (duplicate tab detected at start-up).
   useEffect(() => {

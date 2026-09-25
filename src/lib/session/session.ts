@@ -6,6 +6,7 @@
  * identity lease, picks a label and starts timers; `dispose()` is synchronous and idempotent.
  */
 import { Replica } from "../crdt/replica";
+import { isValidOp } from "../crdt/sanitize";
 import type { Op, OpId, ReplicaId, ShapeId, ShapeView, TransactOptions, Tx, TxnId, UndoResult, VectorClock } from "../crdt/types";
 import { vcEquals, vcGet, vcLeq } from "../crdt/vector-clock";
 import { NetworkSim } from "../sync/network";
@@ -21,10 +22,10 @@ import {
   type Transport,
 } from "../sync/protocol";
 import { BroadcastTransport } from "../sync/transport";
-import { LinkRouter } from "../sync/router";
+import { LinkRouter, type Path } from "../sync/router";
 import { RtcLink, rtcAvailable, type RtcOptions } from "../sync/rtc";
-import { decodePairing, PairingCodeError } from "../sync/rtc-codec";
-import { isValidMessage, sanitizePresence } from "../sync/validate";
+import { decodePairing, PairingCodeError, type PairingAnswer } from "../sync/rtc-codec";
+import { isValidMessage, RELAY_MAX_HOPS, sanitizePresence } from "../sync/validate";
 import { threadColor } from "../ui/colors";
 import { Persistence, safeSessionStorage, storageKey } from "./persistence";
 import type {
@@ -41,9 +42,15 @@ import type {
 } from "./types";
 
 const LABEL_WAIT_MS = 350;
-/** A merge window closes once clocks match, after this long with no merge traffic, or at the cap. */
+/**
+ * A merge window closes once clocks match, after this long with no merge traffic, or at the
+ * cap. "Traffic" includes a WebRTC link still carrying a large catch-up (chunks arriving, or
+ * our own backlog draining): on a slow link one 250-op message can take longer than this.
+ */
 const MERGE_IDLE_MS = 3000;
+/** Cap for a window with no link progress; one whose catch-up is still flowing may run to the hard cap. */
 const MERGE_WINDOW_MAX_MS = 30_000;
+const MERGE_WINDOW_HARD_MAX_MS = 10 * 60_000;
 const IDLE_MAX_MS = 5 * 60_000;
 const PRESENCE_MS = 33;
 const CHUNK_OPS = 250;
@@ -81,6 +88,23 @@ interface PeerRecord {
   presence: PresenceState | null;
   presenceSeq: number;
   status: PeerStatus;
+  /** Last time we heard it directly (0 = only ever through a bridge tab's relay). */
+  lastDirect: number;
+  /** Path its latest message arrived on ("base" or a link's pid). */
+  path: Path;
+  /** The bridge tab that relayed its latest message, or null when heard directly. */
+  via: ReplicaId | null;
+  /** On another computer: heard over a WebRTC link, or relayed across one. */
+  remote: boolean;
+  /** Its path just went away (link closed, cable pulled): unreachable until heard again. */
+  cut: boolean;
+}
+
+/** How a message reached us. */
+interface Route {
+  path: Path;
+  relay: ReplicaId | null;
+  remote: boolean;
 }
 
 interface MergeWindow {
@@ -88,6 +112,8 @@ interface MergeWindow {
   peers: Set<ReplicaId>;
   openedAt: number;
   lastActivity: number;
+  /** Last time a WebRTC link showed progress (chunk arrived / backlog draining). */
+  lastLinkProgress: number;
   apartMs: number;
   vcBefore: VectorClock;
   received: OpId[];
@@ -145,6 +171,14 @@ export class WhiteboardSession implements WhiteboardSessionApi {
 
   private presence: PresenceState;
   private presenceSeq = 0;
+  /** Counter on our hello / heartbeat / bye, so bridges forward each exactly once. */
+  private beat = 0;
+  /** Highest beat of each author we have relayed (per instance nonce). */
+  private relayedUpTo = new Map<ReplicaId, { nonce: string; beat: number }>();
+  /** Last value of router.activity() a merge window saw. */
+  private linkActivitySeen = -1;
+  /** Invite pids this tab withdrew before any reply arrived (to explain a stale reply later). */
+  private withdrawnInvites = new Set<string>();
   private presenceTimer: unknown = null;
   private presenceDirty = false;
   private remotePresence: ReadonlyMap<ReplicaId, PresenceState> = new Map();
@@ -199,7 +233,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     this.router = new LinkRouter(transport);
     // The cable switch and chaos sit in front of *every* path, WebRTC included.
     this.net = new NetworkSim(this.router, { conditions: this.conditions, timers: this.timers, random: this.random });
-    this.net.onMessage((m) => this.handle(m));
+    this.net.onMessage((m, _via, path) => this.handle(m, path ?? "base"));
     this.unsubReplica = this.replica.subscribe(() => {
       this.scheduleSave();
       this.touch();
@@ -277,7 +311,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     };
     const onHide = () => {
       this.saveNow();
-      this.send({ ...this.envelope(), t: "bye" });
+      this.send({ ...this.envelope(), t: "bye", beat: ++this.beat });
     };
     document.addEventListener("visibilitychange", onVis);
     window.addEventListener("pagehide", onHide);
@@ -290,7 +324,7 @@ export class WhiteboardSession implements WhiteboardSessionApi {
   dispose(): void {
     if (this.disposed) return;
     if (this.started) {
-      this.send({ ...this.envelope(), t: "bye" });
+      this.send({ ...this.envelope(), t: "bye", beat: ++this.beat });
       this.saveNow();
     }
     this.disposed = true;
@@ -354,8 +388,12 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     const view = this.replica.getView();
     const self = this.replica.id;
     const out: PeerInfo[] = [];
+    const rtc = this.router?.rtcPeers() ?? new Set<ReplicaId>();
     for (const p of this.peers.values()) {
       const converged = vcEquals(p.vc, view.vc) && p.stateHash === view.stateHash;
+      // Reached over WebRTC right now: the paired tab itself, or a tab behind a live path that
+      // crossed a link (the other computer's other tabs, relayed by a bridge tab).
+      const overRtc = rtc.has(p.replica) || (p.remote && !p.cut && !p.left && (this.router?.isOpenPath(p.path) ?? false));
       out.push({
         replica: p.replica,
         label: p.label,
@@ -364,7 +402,9 @@ export class WhiteboardSession implements WhiteboardSessionApi {
         lastSeen: p.lastSeen,
         vc: p.vc,
         stateHash: p.stateHash,
-        transport: this.router?.rtcPeers().has(p.replica) ? "webrtc" : "broadcast",
+        transport: overRtc ? "webrtc" : "broadcast",
+        remote: p.remote,
+        relay: p.via,
         converged,
         diverged: vcEquals(p.vc, view.vc) && p.stateHash !== view.stateHash,
         unseenByPeer: Math.max(0, vcGet(view.vc, self) - vcGet(p.vc, self)),
@@ -423,6 +463,8 @@ export class WhiteboardSession implements WhiteboardSessionApi {
   setOnline(online: boolean): void {
     if (online === this.conditions.online) return;
     if (!online) {
+      // Last word before the cable is pulled: peers show us unreachable now, not in PEER_STALE_MS.
+      this.sendHeartbeat(true);
       this.offlineSince = this.now();
       this.closeWindow(true);
       this.net?.setConditions({ online: false });
@@ -482,13 +524,65 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       this.sendHello(true);
       if (first) this.emit({ type: "link", link: linkInfo(link), change: "connected" });
     } else if (link.state === "failed") {
+      this.cutPath(link.pid);
       this.router?.removeLink(link.pid);
       this.emit({ type: "link", link: linkInfo(link), change: "failed" });
     } else if (link.state === "closed") {
+      this.cutPath(link.pid);
       this.router?.removeLink(link.pid);
       if (this.linkWasUp.has(link.pid)) this.emit({ type: "link", link: linkInfo(link), change: "lost" });
     }
     this.touch();
+  }
+
+  /**
+   * A path went away (a link closed or failed): every tab we last heard over it is unreachable
+   * *now* — a remote tab that reloaded sent a "hidden" heartbeat first and would otherwise
+   * read as idle (and "In sync") for minutes. Tabs that only heard them through us are told too.
+   */
+  private cutPath(pid: string): void {
+    for (const p of this.peers.values()) if (!p.left && !p.cut && p.path === pid) this.cutPeer(p);
+  }
+
+  /** `p` is out of reach: show it so now, tell the tabs we relayed it to, and cut what came through it. */
+  private cutPeer(p: PeerRecord): void {
+    p.cut = true;
+    p.status = "unreachable";
+    if (p.presence) {
+      p.presence = null;
+      this.rebuildPresence();
+    }
+    this.sendLost(p, p.path);
+    this.cutRelayedThrough(p.replica);
+  }
+
+  /** A bridge tab left or went silent: the tabs we only heard through it are out of reach too. */
+  private cutRelayedThrough(bridge: ReplicaId): void {
+    for (const q of this.peers.values()) {
+      if (q.via === bridge && !q.left && !q.cut) this.cutPeer(q);
+    }
+  }
+
+  /** Tell the tabs we relayed `p` to that we can't reach it any more. */
+  private sendLost(p: PeerRecord, lostPath: Path): void {
+    const last = this.relayedUpTo.get(p.replica);
+    if (!this.router || !this.conditions.online || !last || last.nonce !== p.nonce) return;
+    this.router.forward(
+      {
+        v: PROTOCOL_VERSION,
+        from: p.replica,
+        nonce: p.nonce,
+        t: "heartbeat",
+        label: p.label,
+        vc: p.vc,
+        stateHash: p.stateHash,
+        rtc: p.rtc,
+        visible: p.visible,
+        beat: last.beat,
+        relay: { by: this.replica.id, hops: 1, far: true, lost: true },
+      },
+      lostPath,
+    );
   }
 
   private requireRtc(): void {
@@ -512,7 +606,9 @@ export class WhiteboardSession implements WhiteboardSessionApi {
   async acceptInvite(text: string): Promise<RtcLinkInfo> {
     this.requireRtc();
     const offer = await decodePairing(text);
-    if (offer.k !== "offer") throw new PairingCodeError("That's a reply code. Paste it into the computer that made the invite.");
+    if (offer.k !== "offer") {
+      throw this.replyProblem(offer) ?? new PairingCodeError("That's a reply code. Paste it under “Invite a computer”, where the invite was made.");
+    }
     if (offer.from === this.replica.id) throw new PairingCodeError("That's this tab's own invite — open it on the other computer.");
     if (offer.room !== this.room) throw new RoomMismatchError(offer.room);
     const existing = this.links.get(offer.pid);
@@ -539,26 +635,55 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     this.requireRtc();
     const answer = await decodePairing(text);
     if (answer.k !== "answer") throw new PairingCodeError("That's an invite, not a reply. Paste the reply code the other computer showed you.");
-    const link = this.links.get(answer.pid);
-    if (!link || link.role !== "inviter") throw new PairingCodeError("No open invite in this tab matches that reply. Was it made in another tab?");
+    const problem = this.replyProblem(answer);
+    if (problem) throw problem;
+    const link = this.links.get(answer.pid)!;
     await link.complete(text);
     this.touch();
     return linkInfo(link);
   }
 
+  /**
+   * Why a reply code can't be used here — null if it answers one of this tab's open invites.
+   * Stale and reused codes get the real reason, not a generic "doesn't match".
+   */
+  private replyProblem(answer: PairingAnswer): PairingCodeError | null {
+    if (answer.from === this.replica.id) return new PairingCodeError("That's this tab's own reply code — send it back to the computer that invited you.");
+    const link = this.links.get(answer.pid);
+    if (link?.role === "inviter") {
+      if (link.state === "waiting-answer") return null;
+      const who = link.remoteLabel ? `Tab ${this.peers.get(link.remoteReplica ?? "")?.label ?? link.remoteLabel}` : "another computer";
+      if (link.remoteReplicas.has(answer.from)) {
+        return new PairingCodeError(
+          link.state === "connected" || link.state === "disconnected"
+            ? `That reply was already used — this invite is connected to ${who}.`
+            : "That reply was already used for this invite. If it didn't connect, make a new invite.",
+        );
+      }
+      return new PairingCodeError(`That invite was already used by ${who}. Make a new invite for this computer (“Invite another computer”).`);
+    }
+    if (this.withdrawnInvites.has(answer.pid)) {
+      return new PairingCodeError("That reply is for an invite you replaced or cancelled. Send them your newest invite link, and paste the reply to that one.");
+    }
+    if (link?.role === "invitee") return new PairingCodeError("That's a reply code for an invite this tab joined — it belongs on the computer that made the invite.");
+    return new PairingCodeError("No open invite in this tab matches that reply. Was it made in another tab?");
+  }
+
   closeLink(pid: string): void {
     const link = this.links.get(pid);
     if (!link) return;
+    if (link.role === "inviter" && (link.state === "gathering" || link.state === "waiting-answer")) this.withdrawnInvites.add(pid);
     this.links.delete(pid);
     this.router?.removeLink(pid);
-    link.close();
+    // Deliberate: tell the other side first, so it can say "disconnected" rather than "lost".
+    link.disconnect();
     this.touch();
   }
 
   syncNow(): void {
     this.sendHello(true);
     this.sendHeartbeat();
-    for (const p of this.peers.values()) if (!p.left) this.pushTo(p.replica, p.vc, true);
+    for (const p of this.peers.values()) if (!p.left && this.reachableDirectly(p)) this.pushTo(p.replica, p.vc, true);
   }
 
   whenConverged(timeoutMs = 5000): Promise<void> {
@@ -625,12 +750,54 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       wantReply,
       rtc: this.rtcSupported(),
       visible: this.visible(),
+      // Unicast replies are never relayed, so only broadcasts need a beat.
+      ...(to ? {} : { beat: ++this.beat }),
     });
   }
 
-  private sendHeartbeat(): void {
+  private sendHeartbeat(offline = false): void {
     const view = this.replica.getView();
-    this.send({ ...this.envelope(), t: "heartbeat", label: this.replica.label, vc: view.vc, stateHash: view.stateHash, rtc: this.rtcSupported(), visible: this.visible() });
+    this.send({
+      ...this.envelope(),
+      t: "heartbeat",
+      label: this.replica.label,
+      vc: view.vc,
+      stateHash: view.stateHash,
+      rtc: this.rtcSupported(),
+      visible: this.visible(),
+      beat: ++this.beat,
+      ...(offline ? { offline: true } : {}),
+    });
+  }
+
+  /** Its latest message came directly, not through a bridge: a unicast can reach it. */
+  private reachableDirectly(p: PeerRecord): boolean {
+    return p.via === null && p.lastDirect > 0;
+  }
+
+  /** Heard directly and recently: relayed copies about it are ignored (the direct path is authoritative). */
+  private heardDirectly(p: PeerRecord): boolean {
+    return this.reachableDirectly(p) && this.now() - p.lastDirect < PEER_STALE_MS;
+  }
+
+  /**
+   * Bridge tabs (those with a WebRTC link) forward presence-class messages between their paths
+   * — BroadcastChannel → links, a link → BroadcastChannel and the other links — so the tabs on
+   * both computers see each other: labels stay unique, "In sync with…" and the avatars are
+   * right. Each message is forwarded once (per-author beat) and at most RELAY_MAX_HOPS times.
+   * Ops are never relayed: anti-entropy already carries them through the bridge.
+   */
+  private maybeRelay(msg: SyncMessage, path: Path): void {
+    const router = this.router;
+    if (!router || msg.to || (msg.t !== "hello" && msg.t !== "heartbeat" && msg.t !== "bye")) return;
+    if (msg.beat === undefined) return; // an older build: nothing to dedupe by
+    const hops = msg.relay?.hops ?? 0;
+    if (hops >= RELAY_MAX_HOPS) return;
+    if (path === "base" && !router.hasOpenLinkBesides("base")) return; // not a bridge
+    const last = this.relayedUpTo.get(msg.from);
+    if (last && last.nonce === msg.nonce && msg.beat <= last.beat) return;
+    this.relayedUpTo.set(msg.from, { nonce: msg.nonce, beat: msg.beat });
+    router.forward({ ...msg, relay: { by: this.replica.id, hops: hops + 1, far: !!msg.relay?.far || path !== "base" } }, path);
   }
 
   /** Send a peer the ops it lacks (suppressing duplicate pushes while earlier ones are in flight). */
@@ -655,7 +822,8 @@ export class WhiteboardSession implements WhiteboardSessionApi {
 
   private upsertPeer(
     msg: { from: ReplicaId; nonce: string; label: string; vc: VectorClock; stateHash: string; visible: boolean; rtc: boolean },
-    reconnecting = false,
+    reconnecting: boolean,
+    route: Route,
   ): PeerRecord {
     const t = this.now();
     let p = this.peers.get(msg.from);
@@ -674,6 +842,11 @@ export class WhiteboardSession implements WhiteboardSessionApi {
         presence: null,
         presenceSeq: -1,
         status: "online",
+        lastDirect: 0,
+        path: route.path,
+        via: route.relay,
+        remote: route.remote,
+        cut: false,
       };
       this.peers.set(msg.from, p);
     }
@@ -681,6 +854,8 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     const announce = (p.left || (p.label === "?" && msg.label !== "?") || !this.announced.has(msg.from)) && msg.label !== "?";
     const prevVc = p.vc;
     Object.assign(p, { nonce: msg.nonce, label: msg.label, vc: msg.vc, stateHash: msg.stateHash, lastSeen: t, visible: msg.visible, left: false, rtc: msg.rtc });
+    Object.assign(p, { path: route.path, via: route.relay, remote: route.remote, cut: false });
+    if (!route.relay) p.lastDirect = t;
     p.status = msg.visible ? "online" : "idle";
     // Announce once the peer has a letter — and again when a tab that said bye comes back.
     if (announce) {
@@ -696,33 +871,59 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       this.window.peers.add(msg.from);
       if (!this.window.peerHad.has(msg.from)) this.window.peerHad.set(msg.from, vcGet(msg.vc, this.replica.id));
     }
-    // Label collision among live peers: the greater replica id re-picks (display only).
+    // Label collision among live peers (relayed ones included, so letters are unique across
+    // computers): the greater replica id re-picks (display only).
     if (!this.labelForced && this.ready && msg.label !== "?" && msg.label === this.replica.label && this.replica.id > msg.from) this.pickLabel();
     return p;
   }
 
-  private handle(raw: SyncMessage): void {
+  private peerLeft(replica: ReplicaId): void {
+    const p = this.peers.get(replica);
+    if (!p || p.left) return;
+    this.announced.delete(replica);
+    p.presenceSeq = -1;
+    p.left = true;
+    p.status = "left";
+    p.presence = null;
+    this.rebuildPresence();
+    this.emit({ type: "peer-left", replica });
+    this.cutRelayedThrough(replica);
+  }
+
+  private handle(raw: SyncMessage, path: Path = "base"): void {
     if (this.disposed || !isValidMessage(raw)) return;
     const msg = raw;
     if (msg.to && msg.to !== this.replica.id) return;
+    const relay = msg.relay;
     if (msg.from === this.replica.id) {
-      // Someone else is using our identity (only possible without Web Locks).
-      if (msg.nonce !== this.nonce && !this.leaseHeld && this.nonce > msg.nonce) {
+      // Someone else is using our identity (only possible without Web Locks). A relayed copy of
+      // our own message that came back around through two bridges is not that.
+      if (!relay && msg.nonce !== this.nonce && !this.leaseHeld && this.nonce > msg.nonce) {
         this.forkTo(randomId(this.random), "Another tab was using this tab's identity, so this one continues as a new replica.");
         this.sendHello(true);
       }
       return;
     }
+    if (relay) {
+      this.handleRelayed(msg, relay, path);
+      return;
+    }
+    this.maybeRelay(msg, path);
+    const route: Route = { path, relay: null, remote: path !== "base" };
     switch (msg.t) {
       case "hello": {
-        this.upsertPeer(msg, msg.wantReply);
+        this.upsertPeer(msg, msg.wantReply, route);
         if (msg.wantReply) this.sendHello(false, msg.from);
         this.pushTo(msg.from, msg.vc, true);
         break;
       }
       case "heartbeat": {
         const before = this.peers.get(msg.from)?.vc;
-        this.upsertPeer(msg);
+        const p = this.upsertPeer(msg, false, route);
+        if (msg.offline) {
+          this.cutPeer(p); // its cable is being pulled; nothing we send would arrive
+          break;
+        }
         this.pushTo(msg.from, msg.vc);
         // Message-driven liveness: a peer whose clock moved hears from us immediately.
         if (before && !vcEquals(before, msg.vc)) this.sendHeartbeat();
@@ -755,23 +956,46 @@ export class WhiteboardSession implements WhiteboardSessionApi {
         return; // presence lives in its own store; don't rebuild session state at 30 Hz
       }
       case "bye": {
-        const p = this.peers.get(msg.from);
-        if (p && !p.left) {
-          this.announced.delete(msg.from);
-          p.presenceSeq = -1;
-          p.left = true;
-          p.status = "left";
-          p.presence = null;
-          this.rebuildPresence();
-          this.emit({ type: "peer-left", replica: msg.from });
-        }
+        this.peerLeft(msg.from);
         break;
       }
     }
     this.touch();
   }
 
-  private integrateRemote(ops: Op[]): void {
+  /**
+   * A copy a bridge tab forwarded: it only updates what we show about a tab we can't hear
+   * directly (never a reply, never a push — its catch-up flows through the bridge).
+   */
+  private handleRelayed(msg: SyncMessage, relay: NonNullable<SyncMessage["relay"]>, path: Path): void {
+    const p = this.peers.get(msg.from);
+    if (relay.lost) {
+      // The bridge we heard this tab through can't reach it any more.
+      if (p && !p.left && !p.cut && p.via === relay.by && !this.heardDirectly(p)) this.cutPeer(p);
+      this.touch();
+      return;
+    }
+    this.maybeRelay(msg, path);
+    if (p && this.heardDirectly(p)) return; // the direct path is authoritative
+    const route: Route = { path, relay: relay.by, remote: relay.far || path !== "base" };
+    switch (msg.t) {
+      case "hello":
+      case "heartbeat": {
+        const peer = this.upsertPeer(msg, false, route);
+        if (msg.t === "heartbeat" && msg.offline) this.cutPeer(peer);
+        break;
+      }
+      case "bye":
+        if (p && p.nonce === msg.nonce) this.peerLeft(msg.from);
+        break;
+    }
+    this.touch();
+  }
+
+  private integrateRemote(raw: Op[]): void {
+    // Validate element by element before anything reads them (a malformed entry from a buggy
+    // or hostile peer must not throw out of the message handler and drop the valid ops).
+    const ops = raw.filter(isValidOp);
     const w = this.window;
     if (w) {
       for (const op of ops) {
@@ -808,11 +1032,13 @@ export class WhiteboardSession implements WhiteboardSessionApi {
 
   private openWindow(direction: MergeReport["direction"], peers: ReplicaId[], apartMs: number): void {
     if (this.window) return;
+    this.linkActivitySeen = this.router?.activity() ?? -1;
     this.window = {
       direction,
       peers: new Set(peers),
       openedAt: this.now(),
       lastActivity: this.now(),
+      lastLinkProgress: -Infinity,
       apartMs,
       vcBefore: this.replica.getView().vc,
       received: [],
@@ -828,7 +1054,17 @@ export class WhiteboardSession implements WhiteboardSessionApi {
     const w = this.window;
     if (!w) return;
     const t = this.now();
-    if (t - w.openedAt > MERGE_WINDOW_MAX_MS || t - w.lastActivity > MERGE_IDLE_MS) return this.closeWindow();
+    // A link still carrying a big catch-up (chunks arriving, our backlog draining) is activity:
+    // a single 250-op message can take longer than MERGE_IDLE_MS on a slow link.
+    if (this.router) {
+      const act = this.router.activity();
+      if (act !== this.linkActivitySeen || this.router.busy()) w.lastLinkProgress = t;
+      this.linkActivitySeen = act;
+    }
+    const flowing = t - w.lastLinkProgress <= MERGE_IDLE_MS;
+    if (flowing) w.lastActivity = Math.max(w.lastActivity, w.lastLinkProgress);
+    const age = t - w.openedAt;
+    if (age > MERGE_WINDOW_HARD_MAX_MS || (age > MERGE_WINDOW_MAX_MS && !flowing) || t - w.lastActivity > MERGE_IDLE_MS) return this.closeWindow();
     const view = this.replica.getView();
     if (view.pending.length) return;
     const live = [...this.peers.values()].filter((p) => !p.left && p.status !== "unreachable");
@@ -886,23 +1122,35 @@ export class WhiteboardSession implements WhiteboardSessionApi {
       this.sendHeartbeat();
       // Peer liveness (frozen while we're offline: we simply can't know).
       let presenceChanged = false;
+      const silenced: ReplicaId[] = [];
       for (const p of this.peers.values()) {
         if (p.left) continue;
         const age = t - p.lastSeen;
-        const next: PeerStatus = age < PEER_STALE_MS ? (p.visible ? "online" : "idle") : !p.visible && age < IDLE_MAX_MS ? "idle" : "unreachable";
+        const next: PeerStatus = p.cut
+          ? "unreachable"
+          : age < PEER_STALE_MS
+            ? p.visible
+              ? "online"
+              : "idle"
+            : !p.visible && age < IDLE_MAX_MS
+              ? "idle"
+              : "unreachable";
         if (next !== p.status) {
           p.status = next;
           if (next === "unreachable" && p.presence) {
             p.presence = null;
             presenceChanged = true;
           }
+          if (next === "unreachable") silenced.push(p.replica);
         }
       }
+      // A bridge that went silent takes the tabs behind it along.
+      for (const r of silenced) this.cutRelayedThrough(r);
       if (presenceChanged) this.rebuildPresence();
       // Causal gaps that don't heal on their own → ask the peers.
       if (this.stuckSince !== null && t - this.stuckSince > BUFFER_STUCK_MS) {
         const vc = this.replica.getView().vc;
-        for (const p of this.peers.values()) if (!p.left) this.send({ ...this.envelope(), to: p.replica, t: "sync-req", vc });
+        for (const p of this.peers.values()) if (!p.left && this.reachableDirectly(p)) this.send({ ...this.envelope(), to: p.replica, t: "sync-req", vc });
         this.stuckSince = t;
       }
     }
@@ -1079,8 +1327,10 @@ function linkInfo(l: RtcLink): RtcLinkInfo {
     state: l.state,
     code: l.code,
     remoteReplica: l.remoteReplica,
+    remoteReplicas: [...l.remoteReplicas],
     remoteLabel: l.remoteLabel,
     error: l.error,
+    remoteClosed: l.remoteClosed,
     createdAt: l.createdAt,
   };
 }

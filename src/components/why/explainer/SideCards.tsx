@@ -6,22 +6,12 @@
  */
 import clsx from "clsx";
 import { Check, WifiOff } from "lucide-react";
-import type { OpId, PropKey, ShapeProps, ShapeView } from "@/lib/crdt/types";
-import { canonicalJson } from "@/lib/crdt/hash";
+import type { OpId, PropKey, ShapeView } from "@/lib/crdt/types";
 import { Swatch, ThreadChip } from "../bits";
 import { capital, causeWord, clockTime, valueSwatch, valueWord } from "../format";
-import { roleWord, useExplainer, type DisplaySide, type WhyVariant } from "./model";
+import { roleWord, sameValues, useExplainer, type DisplaySide, type WhyVariant } from "./model";
 
 export type AdoptState = { kind: "button"; label: string; destructive?: boolean } | { kind: "current" } | { kind: "none" };
-
-function sameValues(wrote: Partial<ShapeProps>, shape: ShapeView, props: readonly PropKey[]): boolean {
-  for (const p of props) {
-    const v = (wrote as Partial<Record<PropKey, unknown>>)[p];
-    if (v === undefined) continue;
-    if (canonicalJson(v) !== canonicalJson((shape as unknown as Record<PropKey, unknown>)[p])) return false;
-  }
-  return true;
-}
 
 /** Can this side's value be adopted right now, and how should the control read? */
 export function adoptStateFor(d: DisplaySide, kind: string, props: readonly PropKey[], shape: ShapeView | null): AdoptState {
@@ -66,6 +56,10 @@ export function SideCard({
   const swatch = valueSwatch(side.wrote, props);
   const tone = roleClass(d.role);
   const compact = variant === "seam";
+  // Settled later (e.g. someone picked the other value by hand): say what the merge decided
+  // without contradicting the board — "lost the merge ✓ on the board", not "kept in history".
+  const settled = model.conflict.status === "superseded" && model.conflict.kind === "concurrent-write";
+  const word = settled && d.role === "winner" ? "won the merge" : settled && d.role === "loser" && adopt.kind === "current" ? "lost the merge" : roleWord(d.role);
   return (
     <div
       className={clsx(
@@ -96,7 +90,7 @@ export function SideCard({
                 : { color: "var(--ink-2)", boxShadow: "inset 0 0 0 1px var(--line-2)" }
             }
           >
-            {roleWord(d.role)}
+            {word}
           </span>
         </div>
         <p className={clsx("text-ink-2", compact ? "text-[11.5px] leading-snug" : "text-[12.5px] leading-snug")}>

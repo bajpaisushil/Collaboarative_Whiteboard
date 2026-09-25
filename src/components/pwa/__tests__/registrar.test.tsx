@@ -63,6 +63,7 @@ afterEach(() => {
   root = null;
   host = null;
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -94,6 +95,39 @@ describe("ServiceWorkerRegistrar", () => {
     await mount();
     expect(container.register).toHaveBeenCalledWith(SW_URL, { scope: "/", updateViaCache: "none" });
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "weave:warm", page: location.href, assets: expect.any(Array) }));
+  });
+
+  it("keeps sending files that finish loading after the first warm-up (in flight when the worker took over)", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    let deliver: ((entries: { name: string; workerStart: number }[]) => void) | null = null;
+    const disconnect = vi.fn();
+    class FakeObserver {
+      constructor(cb: (list: { getEntries(): unknown[] }) => void) {
+        deliver = (entries) => cb({ getEntries: () => entries });
+      }
+      observe() {}
+      disconnect = disconnect;
+    }
+    vi.stubGlobal("PerformanceObserver", FakeObserver);
+    const { container, postMessage } = fakeContainer();
+    install(container);
+    await mount();
+    expect(postMessage).toHaveBeenCalledTimes(1); // the page + what had loaded so far
+    const late = `${location.origin}/_next/static/chunks/board-app.js`;
+    await act(async () => {
+      deliver!([
+        { name: late, workerStart: 0 }, // finished after the list was sent: never cached otherwise
+        { name: `${location.origin}/_next/static/chunks/seen-by-worker.js`, workerStart: 12 }, // went through the worker
+        { name: "https://cdn.example.com/x.js", workerStart: 0 }, // not ours
+      ]);
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    expect(postMessage).toHaveBeenCalledTimes(2);
+    expect(postMessage).toHaveBeenLastCalledWith({ type: "weave:warm", assets: [late] });
+    // …and only for a while: unmounting stops watching.
+    act(() => root?.unmount());
+    root = null;
+    expect(disconnect).toHaveBeenCalled();
   });
 
   it("in production on an insecure origin, does nothing", async () => {

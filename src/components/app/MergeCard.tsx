@@ -39,16 +39,7 @@ interface MergeCardModel {
   announcement: string;
 }
 
-/** Letters of the tabs involved: the report's peers, else the authors of the received edits. */
-function peerLabelsOf(report: MergeReport, session: WhiteboardSessionApi): string[] {
-  const self = session.getState().replica;
-  const ids = new Set<string>(report.peers.filter((r) => r !== self));
-  if (ids.size === 0) {
-    for (const opId of report.receivedOpIds) {
-      const author = session.replica.getOp(opId)?.replica ?? opId.slice(0, opId.lastIndexOf(":"));
-      if (author && author !== self) ids.add(author);
-    }
-  }
+function labelsOf(ids: Iterable<string>, session: WhiteboardSessionApi): string[] {
   const labels = new Set<string>();
   for (const r of ids) {
     const l = labelOf(session, r);
@@ -57,10 +48,35 @@ function peerLabelsOf(report: MergeReport, session: WhiteboardSessionApi): strin
   return [...labels].sort();
 }
 
-function buildModel(report: MergeReport, session: WhiteboardSessionApi): MergeCardModel | null {
+/** Letters of the tabs that wrote the edits we received (not whoever happened to pass them on). */
+export function authorLabelsOf(report: MergeReport, session: WhiteboardSessionApi): string[] {
+  const self = session.getState().replica;
+  const ids = new Set<string>();
+  for (const opId of report.receivedOpIds) {
+    const author = session.replica.getOp(opId)?.replica ?? opId.slice(0, opId.lastIndexOf(":"));
+    if (author && author !== self) ids.add(author);
+  }
+  return labelsOf(ids, session);
+}
+
+/** Letters of the tabs we (re)connected with: the report's peers, else the authors. */
+function peerLabelsOf(report: MergeReport, session: WhiteboardSessionApi): string[] {
+  const self = session.getState().replica;
+  const peers = labelsOf(
+    report.peers.filter((r) => r !== self),
+    session,
+  );
+  return peers.length > 0 ? peers : authorLabelsOf(report, session);
+}
+
+export function buildMergeCardModel(report: MergeReport, session: WhiteboardSessionApi): MergeCardModel | null {
   const peerLabels = peerLabelsOf(report, session);
   const peers = listLabels(peerLabels);
-  const who = peers || "another tab";
+  // Who *brought* edits: their authors. Through a bridge tab, the tab we heard from (the
+  // report's peer) is often not the one that made the edit.
+  const authorLabels = authorLabelsOf(report, session);
+  const authors = listLabels(authorLabels.length > 0 ? authorLabels : peerLabels);
+  const who = authors || peers || "another tab";
   const byId = new Map(session.replica.getView().conflicts.map((c) => [c.id, c] as const));
   const fresh = report.newConflicts.map((id) => byId.get(id)).filter((c): c is Conflict => c !== undefined);
   const knotList = fresh.filter(isLiveKnot);
@@ -78,7 +94,7 @@ function buildModel(report: MergeReport, session: WhiteboardSessionApi): MergeCa
       if (received === 0 && sent === 0) return null;
       const apart = report.apartMs >= 1000 ? ` after ${formatDuration(report.apartMs)}` : "";
       title = peers ? `Rejoined ${peers}${apart}` : `Back online${apart}`;
-      facts.push({ text: `you brought ${plural(sent, "edit")}` }, { text: `${peers || "others"} brought ${received}` });
+      facts.push({ text: `you brought ${plural(sent, "edit")}` }, { text: `${authors || "others"} brought ${received}` });
       break;
     }
     case "peer-returned": {
@@ -86,7 +102,8 @@ function buildModel(report: MergeReport, session: WhiteboardSessionApi): MergeCa
       const verb = peerLabels.length > 1 ? "are" : "is";
       if (offline > 0) {
         // They were unplugged (or unreachable) and came back with edits made meanwhile.
-        title = `${peers || "A tab"} ${verb} back with ${plural(offline, "offline edit")}`;
+        const many = (authorLabels.length || peerLabels.length) > 1;
+        title = `${authors || "A tab"} ${many ? "are" : "is"} back with ${plural(offline, "offline edit")}`;
         if (received > offline) facts.push({ text: `+${received - offline} more` });
       } else if (received > 0) {
         // Both online, but slow links let edits cross in flight.
@@ -110,7 +127,7 @@ function buildModel(report: MergeReport, session: WhiteboardSessionApi): MergeCa
 
   return {
     id: report.id,
-    peerLabel: peerLabels[0] ?? null,
+    peerLabel: authorLabels[0] ?? peerLabels[0] ?? null,
     title,
     facts,
     knots,
@@ -135,7 +152,7 @@ export function MergeCard() {
         flash: { shapeIds: report.changed.map((c) => c.shapeId), revived: report.resurrected, at: Date.now() },
       });
     }
-    const model = buildModel(report, session);
+    const model = buildMergeCardModel(report, session);
     if (!model) return;
     setCard(model);
     setPaused(false);

@@ -9,7 +9,7 @@ import { Laptop } from "lucide-react";
 import { useStore, type StoreApi } from "zustand";
 import { useSessionState } from "@/lib/session/react";
 import { TipBody, Tooltip } from "@/components/ui/Tooltip";
-import { PAIRING_TITLE, selectConnectedLinkCount, selectRtcAvailable } from "../pairing/links";
+import { PAIRING_TITLE, selectBridgeLabel, selectConnectedLinkCount, selectRtcAvailable } from "../pairing/links";
 import { usePairingStore } from "../pairing/PairingProvider";
 import type { PairingStore } from "../pairing/store";
 
@@ -24,7 +24,15 @@ function ConnectButtonInner({ store }: { store: StoreApi<PairingStore> }) {
   const open = useStore(store, selectOpen);
   const available = useSessionState(selectRtcAvailable);
   const connected = useSessionState(selectConnectedLinkCount);
-  const status = connected === 0 ? "" : connected === 1 ? "1 computer connected" : `${connected} computers connected`;
+  const bridge = useSessionState(selectBridgeLabel);
+  const status =
+    connected === 0
+      ? bridge
+        ? `Linked to another computer through Tab ${bridge}`
+        : ""
+      : connected === 1
+        ? "1 computer connected"
+        : `${connected} computers connected`;
 
   return (
     <Tooltip

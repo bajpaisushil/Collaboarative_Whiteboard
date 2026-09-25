@@ -11,6 +11,7 @@ import { threadColor } from "@/lib/ui/colors";
 import { KeyCombos } from "@/components/ui/Kbd";
 import { TipBody, Tooltip } from "@/components/ui/Tooltip";
 import { plural } from "../format";
+import { selectBridgeLabel, selectConnectedLinkCount } from "../pairing/links";
 import { selectLabel, selectLivePeerCount, selectOnline, selectUnsynced } from "../selectors";
 import { NetworkPopover } from "./NetworkPopover";
 
@@ -51,6 +52,8 @@ function CableSwitch({ compact }: { compact: boolean }) {
   const label = useSessionState(selectLabel);
   const unsynced = useSessionState(selectUnsynced);
   const peers = useSessionState(selectLivePeerCount);
+  const links = useSessionState(selectConnectedLinkCount);
+  const bridge = useSessionState(selectBridgeLabel);
   const color = threadColor(label);
 
   const sub = online
@@ -70,7 +73,15 @@ function CableSwitch({ compact }: { compact: boolean }) {
         </>
       }
     >
-      Tabs talk directly inside your browser. This switch cuts that link — edits keep working and merge when you reconnect.
+      {links > 0 || bridge ? (
+        <>
+          Tabs on this computer talk inside your browser; the other computer is reached over WebRTC
+          {links > 0 ? "" : ` (through Tab ${bridge})`}. This switch cuts this tab off from both — edits keep working and merge
+          when you reconnect.
+        </>
+      ) : (
+        "Tabs talk directly inside your browser. This switch cuts that link — edits keep working and merge when you reconnect."
+      )}
     </TipBody>
   );
 
@@ -84,12 +95,13 @@ function CableSwitch({ compact }: { compact: boolean }) {
         aria-keyshortcuts="\ Control+Shift+O Meta+Shift+O"
         onClick={() => session.setOnline(!online)}
         className={clsx(
-          "group/cable flex items-center gap-2 rounded-l-full py-1 pr-2.5 text-left",
-          compact ? "h-8 pl-1" : "h-9 pl-1.5",
+          "group/cable flex items-center gap-2 rounded-l-full py-1 pr-2.5 text-left @max-[440px]:pr-1.5",
+          compact ? "h-8 pl-1" : "h-9 pl-1.5 @max-[440px]:pl-1",
         )}
       >
         <CableGraphic online={online} color={color} compact={compact} />
-        <span className="flex flex-col leading-none">
+        {/* Hidden outright when both lines are (no empty gap next to the plug). */}
+        <span className="flex flex-col leading-none @max-[400px]:hidden">
           <span className="text-[13px] font-semibold text-ink @max-[400px]:hidden">{online ? "Online" : "Offline"}</span>
           {!compact && (
             <span className="mt-[3px] whitespace-nowrap font-mono text-[10px] tabular-nums text-muted @max-[1000px]:hidden">{sub}</span>
@@ -105,7 +117,7 @@ function CableGraphic({ online, color, compact }: { online: boolean; color: stri
   const reduce = useReducedMotion();
   const w = compact ? 48 : 56;
   return (
-    <svg width={w} height={26} viewBox="0 0 60 28" fill="none" aria-hidden className="shrink-0 overflow-hidden rounded-full">
+    <svg width={w} height={26} viewBox="0 0 60 28" fill="none" aria-hidden className="shrink-0 overflow-hidden rounded-full @max-[440px]:w-[46px]">
       <motion.g
         initial={false}
         animate={{ x: online ? 4 : -8 }}

@@ -50,7 +50,7 @@ export function KnotCounter() {
         aria-expanded={compact ? undefined : whyOpen}
         aria-label={`${name}. ${compact ? "Show the latest knot" : "Why panel"}`}
         className={clsx(
-          "flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold tabular-nums transition-colors",
+          "flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold tabular-nums transition-colors @max-[440px]:gap-1 @max-[440px]:px-1.5",
           has
             ? "bg-[var(--knot-soft)] text-knot shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--knot)_40%,transparent)] hover:bg-[color-mix(in_oklab,var(--knot)_20%,transparent)]"
             : "text-muted hover:bg-panel-2 hover:text-ink-2",

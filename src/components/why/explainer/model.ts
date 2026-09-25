@@ -5,7 +5,8 @@
  */
 import { createContext, useContext } from "react";
 import { shapeNoun } from "@/lib/crdt/describe";
-import type { Conflict, ExplainSide, Explanation, OpId } from "@/lib/crdt/types";
+import { canonicalJson } from "@/lib/crdt/hash";
+import type { Conflict, ExplainSide, Explanation, OpId, PropKey, ShapeProps, ShapeView } from "@/lib/crdt/types";
 import type { Thread, ThreadOf } from "../threads";
 
 export type WhyVariant = "panel" | "seam";
@@ -72,6 +73,26 @@ export function other(model: ExplainerModel, s: DisplaySide): DisplaySide {
 
 export function sideByOp(model: ExplainerModel, opId: OpId): DisplaySide | undefined {
   return model.sides.find((s) => s.side.opId === opId);
+}
+
+/** Does the shape currently hold every value this side wrote (for the knot's props)? */
+export function sameValues(wrote: Partial<ShapeProps>, shape: ShapeView, props: readonly PropKey[]): boolean {
+  for (const p of props) {
+    const v = (wrote as Partial<Record<PropKey, unknown>>)[p];
+    if (v === undefined) continue;
+    if (canonicalJson(v) !== canonicalJson((shape as unknown as Record<PropKey, unknown>)[p])) return false;
+  }
+  return true;
+}
+
+/**
+ * A write knot that was settled later (picked by hand, undone, overwritten): the side whose
+ * value is on the board now, or null if neither is (someone wrote a third value) — or if the
+ * knot is still live, where the merge's winner is on the board by definition.
+ */
+export function sideOnBoardAfter(model: ExplainerModel, shape: ShapeView | null): DisplaySide | null {
+  if (model.conflict.status !== "superseded" || model.conflict.kind !== "concurrent-write" || !shape || !shape.alive) return null;
+  return model.sides.find((d) => !!d.side.wrote && sameValues(d.side.wrote, shape, model.conflict.props)) ?? null;
 }
 
 /** Short outcome word for a side. */

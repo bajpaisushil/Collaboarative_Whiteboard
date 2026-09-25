@@ -291,9 +291,12 @@ Channel name: `weave:${room}` (room from `?room=`, default `lobby`).
 | `hello`      | on start and on every reconnect; carries vc, label, stateHash, instance nonce |
 | `ops`        | live broadcast of new local ops; or targeted catch-up (`to`) |
 | `sync-req`   | "send me what I lack" — carries requester vc |
-| `heartbeat`  | every ~1.5 s: vc + stateHash + visibility (anti-entropy, stability, convergence badge) |
+| `heartbeat`  | every ~1.5 s: vc + stateHash + visibility (anti-entropy, stability, convergence badge); `offline: true` = last word before the cable switch is pulled (peers show it unreachable at once) |
 | `presence`   | cursor, in-progress stroke, drag preview, selection, editing target (~30 Hz, never logged) |
 | `bye`        | tab closing |
+
+`hello` / `heartbeat` / `bye` carry a per-sender `beat` counter so bridge tabs can relay them
+exactly once (below).
 
 Anti-entropy: on any `hello`/`heartbeat`, if the peer lacks ops we have → send them
 (targeted, chunked), suppressing repeat pushes while an earlier one is still in flight. Ops
@@ -325,9 +328,38 @@ network chaos wrap the router, so "offline" cuts every path. Large messages are 
 reassembled; sends apply backpressure. If a link dies, edits keep working offline and merge
 after re-pairing.
 
+**Bridges and relayed presence**: a tab with a WebRTC link is a *bridge*. It forwards the
+presence-class messages it hears (`hello`, `heartbeat`, `bye` — never ops, never unicasts)
+between its paths — BroadcastChannel → its links, a link → BroadcastChannel and its other
+links — stamped `relay: { by, hops, far }` (once per author `beat`, at most 4 hops). So every
+tab on both computers knows every live replica: the label-collision rule runs against the whole
+room (letters stay unique across computers), avatars and "In sync with…" include the other
+computer's other tabs (shown as remote, "through Tab A"). A relayed copy never teaches the
+router a path (only direct messages do), never renames a link's remote replica, and never
+triggers a reply, push or `sync-req` — catch-up keeps flowing through the bridge. When a path
+goes away (a link closes or fails), every peer last heard over it is marked *unreachable*
+immediately (a remote tab that reloads first reports "hidden", which would otherwise read as
+idle for minutes), and the bridge tells the tabs it relayed those peers to with a
+`relay.lost` notice. A deliberate "Disconnect" sends an `x` control frame on the reliable
+channel first, so the other side reports "Tab A disconnected" rather than a lost connection.
+
+**Reply-code lifetime**: the invitee is the DTLS client; if the inviter never pastes the reply,
+browsers give up retransmitting the handshake after a few minutes (Chromium ≈ 222 s) although
+ICE is up. The invitee therefore times its reply code out at 3 minutes (`REPLY_TTL_MS`) with its
+own message, and the dialog says "within about 3 minutes". Stale and reused codes are diagnosed
+(replaced invite, invite already used by Tab X, a tab's own reply).
+
+**Merge windows over slow links**: a window's idle timer (3 s) also counts WebRTC link
+progress — chunks of a large message arriving, or our own backlog draining — since one
+250-op catch-up message can take longer than that on a slow link; the 30 s cap only applies
+once the link has gone quiet (hard cap 10 min).
+
 **Offline loading**: a service worker (production only, https/localhost) serves `/` and
 `/split` network-first with a cached fallback, and `/_next/static` cache-first, so after one
-online visit the app itself loads with no network.
+online visit the app itself loads with no network. The first visit loads before the worker
+exists: once it is active the page sends it the files it loaded (Resource Timing), and keeps
+sending files that finish afterwards for 30 s — the board's main chunk is typically still
+downloading when the worker claims the page.
 
 **Identity**: before a session becomes `ready`, it takes a Web Locks lease
 `weave:rid:<replicaId>` for its lifetime. "Duplicate tab" / `window.open` clones copy

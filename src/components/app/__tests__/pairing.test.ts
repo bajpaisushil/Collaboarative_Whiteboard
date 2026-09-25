@@ -64,8 +64,10 @@ function fakeSession(opts: { accept?: (text: string) => Promise<Link> } = {}) {
     state: "waiting-answer",
     code: `W1.z.invite${n}`,
     remoteReplica: null,
+    remoteReplicas: [],
     remoteLabel: null,
     error: null,
+    remoteClosed: false,
     createdAt: n,
     ...patch,
   });
@@ -106,6 +108,17 @@ describe("pairing store", () => {
     await store.getState().createInvite();
     expect(closed).toEqual(["p1"]);
     expect(store.getState().invite.pid).toBe("p2");
+  });
+
+  it("a connected tab can invite another computer; the working link stays", async () => {
+    const { session, links, closed } = fakeSession();
+    const store = createPairingStore(session);
+    await store.getState().createInvite();
+    links.get("p1")!.state = "connected";
+    await store.getState().createInvite(); // "Invite another computer"
+    expect(closed).toEqual([]);
+    expect(store.getState().invite).toMatchObject({ phase: "ready", pid: "p2" });
+    expect([...links.keys()]).toEqual(["p1", "p2"]);
   });
 
   it("shows reply-code errors inline and keeps the draft", async () => {

@@ -17,7 +17,11 @@
  *   <  650  mode toggle (X still works)
  *   <  480  help button ("?" still opens the sheet; phones have no keyboard) — room for the laptop
  *   <  460  identity text (letter stays)   ← compact panes in a narrow split
- *   <  400  "Online"/"Offline" text (the plug graphic and aria state stay)
+ *   <  440  tighter gaps and padding, slimmer cable pill, divider before undo/redo
+ *   <  400  "Online"/"Offline" text (the plug graphic and aria state stay); the panel toggle
+ *           (the knot counter opens the same Why panel)
+ * The peers slot centres only while it fits ("safe" centring), so it never slides under the
+ * cable pill.
  */
 import clsx from "clsx";
 import { CircleQuestionMark, PanelRightClose, PanelRightOpen } from "lucide-react";
@@ -54,7 +58,7 @@ function FullBar() {
   return (
     <header
       aria-label="Board controls"
-      className="sheet @container relative flex items-center gap-1.5 px-2"
+      className="sheet @container relative flex items-center gap-1.5 px-2 @max-[440px]:gap-1 @max-[440px]:px-1.5"
       style={{ height: TOPBAR_HEIGHT }}
     >
       <Wordmark className="@max-[700px]:hidden" />
@@ -62,7 +66,7 @@ function FullBar() {
       <IdentityPill />
       <CableControl />
 
-      <div className="flex min-w-0 flex-1 items-center justify-center gap-2 px-1">
+      <div className="flex min-w-0 flex-1 items-center justify-center-safe gap-2 px-1 @max-[440px]:px-0.5">
         <PeerAvatars />
         <span className="flex @max-[820px]:hidden">
           <ConvergenceBadge />
@@ -73,14 +77,16 @@ function FullBar() {
       <span className="flex @max-[650px]:hidden">
         <ModeToggle />
       </span>
-      <Divider />
+      <Divider className="@max-[440px]:hidden" />
       <UndoRedo />
       <Divider className="@max-[920px]:hidden" />
       <span className="flex items-center @max-[920px]:hidden">
         <TabLinks />
       </span>
       <ConnectButton />
-      <PanelToggle />
+      <span className="flex @max-[400px]:hidden">
+        <PanelToggle />
+      </span>
       <span className="flex @max-[820px]:hidden">
         <ThemeToggle />
       </span>

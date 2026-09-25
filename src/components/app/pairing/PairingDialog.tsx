@@ -15,7 +15,7 @@
  * spinner), focus moves to the next step's main control instead of falling to <body>.
  */
 import clsx from "clsx";
-import { ArrowRightLeft, CircleCheck, Laptop, MailOpen, RotateCw, Send, Unplug } from "lucide-react";
+import { ArrowRightLeft, CircleCheck, Laptop, MailOpen, Plus, RotateCw, Send, Unplug } from "lucide-react";
 import { useCallback, useEffect, useRef, type ClipboardEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { RtcLinkInfo, SessionState } from "@/lib/session/types";
 import { useSessionState } from "@/lib/session/react";
@@ -26,7 +26,7 @@ import { ThreadBadge } from "@/components/ui/ThreadBadge";
 import { inviteLink, joinPath } from "../params";
 import { selectLabel, selectRoom } from "../selectors";
 import { LinkList } from "./LinkList";
-import { PAIRING_TITLE, remoteLabelIn, remoteName, selectRtcAvailable } from "./links";
+import { PAIRING_TITLE, remoteLabelIn, remoteName, selectBridgeLabel, selectRtcAvailable } from "./links";
 import { Busy, CodeBox, FIELD, InlineError, PRIMARY_BTN, QUIET_BTN, SECONDARY_BTN, Step, type StepState } from "./parts";
 import { usePairing, useRequiredPairingStore } from "./PairingProvider";
 import type { IceMode, PairingTrack } from "./store";
@@ -75,6 +75,7 @@ export function PairingDialog() {
           <Announcer />
           {available ? (
             <>
+              <LinkedThroughBridge />
               <TrackSwitch track={track} />
               {track === "invite" ? <InviteTrack /> : <JoinTrack />}
             </>
@@ -95,6 +96,24 @@ export function PairingDialog() {
         </div>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * This tab has no link of its own, but another tab here does (a bridge): the board already
+ * syncs with the other computer through it. Say so, so pairing again isn't the only option.
+ */
+function LinkedThroughBridge() {
+  const bridge = useSessionState(selectBridgeLabel);
+  if (!bridge) return null;
+  return (
+    <p className="flex items-start gap-2 rounded-[12px] bg-[color-mix(in_oklab,var(--ok)_8%,var(--panel))] px-3 py-2.5 text-[12.5px] leading-snug text-ink-2 shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--ok)_30%,transparent)]" data-pairing-bridge="">
+      <Laptop aria-hidden className="mt-px size-4 shrink-0 text-ok" strokeWidth={1.9} />
+      <span>
+        <span className="font-medium text-ink">This board is already linked to another computer</span> through Tab {bridge}, another tab
+        on this computer — your edits reach it through that tab. Pair this tab too only if you want a second, direct link.
+      </span>
+    </p>
   );
 }
 
@@ -216,14 +235,15 @@ function Connected({ label }: { label: string | null }) {
       data-pairing-connected=""
     >
       {label ? <ThreadBadge label={label} size="md" status="online" /> : <Laptop aria-hidden className="size-5 text-ok" />}
-      <div className="min-w-0 flex-1">
+      {/* A floor on the text's width: in a narrow dialog "Done" wraps below instead of squeezing it. */}
+      <div className="min-w-[9rem] flex-1">
         <p className="flex items-center gap-1.5 text-[13px] font-semibold text-ink">
           Connected to {remoteName(label)}
           <CircleCheck aria-hidden className="size-4 text-ok" strokeWidth={2.25} />
         </p>
         <p className="text-[12px] text-ink-2">Edits now sync both ways between the two computers.</p>
       </div>
-      <button type="button" data-step-focus="" className={SECONDARY_BTN} onClick={() => store.getState().closeDialog()}>
+      <button type="button" data-step-focus="" className={clsx(SECONDARY_BTN, "ml-auto")} onClick={() => store.getState().closeDialog()}>
         Done
       </button>
     </div>
@@ -252,8 +272,14 @@ function stepState(done: boolean, active: boolean): StepState {
   return done ? "done" : active ? "active" : "todo";
 }
 
-function closedMessage(remote: string | null): string {
+function closedMessage(remote: string | null, remoteClosed = false): string {
+  if (remoteClosed) return `${capitalName(remote)} disconnected this link on their computer. Pair again any time to sync.`;
   return `The connection to ${remoteName(remote)} closed — the other computer may have reloaded or closed the page.`;
+}
+
+function capitalName(remote: string | null): string {
+  const n = remoteName(remote);
+  return n.charAt(0).toUpperCase() + n.slice(1);
 }
 
 function DeadEnd({ message, action, hint, failed }: { message: string; action: ReactNode; hint?: ReactNode; failed: boolean }) {
@@ -288,6 +314,8 @@ function InviteTrack() {
   const waiting = ready && (state === "waiting-answer" || state === "gathering");
   const answered = ready && !waiting;
   const connected = state === "connected";
+  // A working link stays in "Links to other computers"; this tab can still invite another one.
+  const linked = connected || state === "disconnected";
   const url = ready && flow.code ? inviteLink(window.location, room, flow.code) : null;
   const field = useCodeField(
     (t) => void api().completeInvite(t),
@@ -304,11 +332,18 @@ function InviteTrack() {
           {flow.phase === "creating" ? (
             <Busy>Preparing a direct connection… (a few seconds)</Busy>
           ) : ready ? (
-            !answered && (
+            !answered ? (
               <button type="button" className={QUIET_BTN} onClick={() => void api().createInvite()}>
                 <RotateCw aria-hidden className="size-3" />
                 Make a new invite
               </button>
+            ) : (
+              linked && (
+                <button type="button" className={QUIET_BTN} onClick={() => void api().createInvite()} data-invite-another="">
+                  <Plus aria-hidden className="size-3" />
+                  Invite another computer
+                </button>
+              )
             )
           ) : (
             <>
@@ -420,7 +455,7 @@ function InviteStatus({
       return (
         <DeadEnd
           failed={link.state === "failed"}
-          message={link.error ?? (link.state === "closed" ? closedMessage(remote) : "The connection failed.")}
+          message={link.error ?? (link.state === "closed" ? closedMessage(remote, link.remoteClosed) : "The connection failed.")}
           action={
             <button type="button" data-step-focus="" className={PRIMARY_BTN} onClick={() => api().repair(link.pid)}>
               <RotateCw aria-hidden className="size-3.5" />
@@ -457,7 +492,13 @@ function JoinTrack() {
   return (
     <div id="pairing-track" ref={rootRef} tabIndex={-1} className="outline-none" data-track="join">
       <ol aria-label="Join an invite from another computer">
-        <Step n={1} title={ready ? `Invite from ${remoteName(remote)}` : "Paste the invite"} state={stepState(ready, !ready)} color={color}>
+        <Step
+          n={1}
+          // Both computers are often "Tab A" until the link settles their letters: say which is which.
+          title={ready ? `Invite from ${remoteName(remote)}${connected ? "" : " on another computer"}` : "Paste the invite"}
+          state={stepState(ready, !ready)}
+          color={color}
+        >
           {flow.phase === "accepting" ? (
             <Busy>Preparing a direct connection… (a few seconds)</Busy>
           ) : ready ? (
@@ -513,8 +554,8 @@ function JoinTrack() {
                 actions={[{ id: "reply", label: "Copy reply code", what: "Reply code", text: flow.reply, primary: true, stepFocus: true }]}
               />
               <p className="text-[12.5px] text-ink-2">
-                Send this back to the computer that invited you — they paste it to finish. It stays usable for
-                15 minutes.
+                Send this back to the computer that invited you — they paste it to finish. They need to paste it within
+                about 3 minutes; after that, make a new one.
               </p>
             </>
           )}
@@ -527,7 +568,7 @@ function JoinTrack() {
           {ready && dead && (
             <DeadEnd
               failed={state === "failed"}
-              message={link.error ?? closedMessage(remote)}
+              message={link.error ?? closedMessage(remote, link.remoteClosed)}
               hint={
                 state === "failed"
                   ? "If they hadn’t pasted your reply yet, make a new one and send it again — or start over with an invite from this computer."

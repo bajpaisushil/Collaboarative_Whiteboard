@@ -150,6 +150,20 @@ function Dock({ orientation }: { orientation: DockOrientation }) {
     ui.getState().setTool(meta.tool);
   };
 
+  const tools = TOOLS.map((meta, i) => (
+    <Fragment key={meta.tool}>
+      {i === 2 && <Divider vertical={vertical} />}
+      <ToolButton
+        meta={meta}
+        active={tool === meta.tool}
+        disabled={readOnly && !meta.readOnlyOk}
+        vertical={vertical}
+        threadColor={self.color}
+        onPick={pick}
+      />
+    </Fragment>
+  ));
+
   return (
     <div className={clsx("relative", !vertical && "max-w-full")}>
       <div
@@ -160,22 +174,18 @@ function Dock({ orientation }: { orientation: DockOrientation }) {
         data-own-keys=""
         className={clsx(
           "sheet stitch pointer-events-auto flex select-none gap-0.5",
-          vertical ? "flex-col items-center p-1.5" : "max-w-full flex-row items-center overflow-x-auto p-1 [scrollbar-width:none]",
+          vertical ? "flex-col items-center p-1.5" : "max-w-full flex-row items-center p-1 max-[400px]:gap-0",
         )}
       >
-        {TOOLS.map((meta, i) => (
-          <Fragment key={meta.tool}>
-            {i === 2 && <Divider vertical={vertical} />}
-            <ToolButton
-              meta={meta}
-              active={tool === meta.tool}
-              disabled={readOnly && !meta.readOnlyOk}
-              vertical={vertical}
-              threadColor={self.color}
-              onPick={pick}
-            />
-          </Fragment>
-        ))}
+        {vertical ? (
+          tools
+        ) : (
+          // Horizontal (phones): only the tools scroll — the style chip stays in view — and a
+          // fade on the edge says there is more when they don't all fit.
+          <div className="flex min-w-0 flex-row items-center gap-0.5 overflow-x-auto [scrollbar-width:none] max-[400px]:gap-0 max-[400px]:[mask-image:linear-gradient(to_right,black_calc(100%-14px),transparent)]">
+            {tools}
+          </div>
+        )}
         <Divider vertical={vertical} />
         <StyleChip ref={styleButtonRef} open={styleOpen} panelId={panelId} vertical={vertical} onToggle={() => toggleStyle(!styleOpen)} />
       </div>
@@ -187,7 +197,7 @@ function Dock({ orientation }: { orientation: DockOrientation }) {
 }
 
 function Divider({ vertical }: { vertical: boolean }) {
-  return <span aria-hidden className={clsx("shrink-0 bg-line", vertical ? "my-1 h-px w-6" : "mx-1 h-6 w-px")} />;
+  return <span aria-hidden className={clsx("shrink-0 bg-line", vertical ? "my-1 h-px w-6" : "mx-1 h-6 w-px max-[400px]:mx-0.5")} />;
 }
 
 function ToolButton({
@@ -221,7 +231,7 @@ function ToolButton({
       onClick={() => onPick(meta)}
       className={clsx(
         "group relative grid shrink-0 place-items-center rounded-[10px] transition-[background-color,color,transform] duration-100",
-        vertical ? "size-[38px] [@media(max-height:760px)]:size-[33px]" : "size-[34px]",
+        vertical ? "size-[38px] [@media(max-height:760px)]:size-[33px]" : "size-[34px] max-[400px]:size-[31px]",
         active ? "bg-panel-2 text-ink shadow-[inset_0_0_0_1px_var(--line-2)]" : "text-ink-2 hover:bg-panel-2 hover:text-ink",
         disabled ? "cursor-not-allowed opacity-35" : "active:translate-y-px",
       )}
@@ -280,7 +290,7 @@ function StyleChip({
       onClick={onToggle}
       className={clsx(
         "relative grid shrink-0 place-items-center rounded-[10px] transition-[background-color,transform] duration-100 active:translate-y-px",
-        vertical ? "size-[38px] [@media(max-height:760px)]:size-[33px]" : "size-[34px]",
+        vertical ? "size-[38px] [@media(max-height:760px)]:size-[33px]" : "size-[34px] max-[400px]:size-[31px]",
         open ? "bg-panel-2 shadow-[inset_0_0_0_1px_var(--line-2)]" : "hover:bg-panel-2",
       )}
     >

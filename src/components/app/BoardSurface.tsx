@@ -126,7 +126,9 @@ function BoardLayout({ rootRef, compact, paneId }: { rootRef: RefObject<HTMLDivE
       data-pane={paneId}
       data-focus-home=""
       onPointerDownCapture={onPointerDownCapture}
-      className="relative isolate flex h-full w-full flex-col overflow-hidden bg-paper text-ink outline-none"
+      // overflow-clip, not -hidden: a hidden box can still be scrolled by focus()/scrollIntoView,
+      // and an (invisible) tooltip poking past a narrow window would shift the whole board.
+      className="relative isolate flex h-full w-full flex-col overflow-clip bg-paper text-ink outline-none"
       style={style}
     >
       <PaneHotkeys />

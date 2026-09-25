@@ -26,24 +26,52 @@ export function isValidVc(v: unknown): boolean {
 }
 
 const TYPES = new Set(["hello", "ops", "sync-req", "heartbeat", "presence", "bye"]);
+/** Only presence-class messages are ever forwarded by a bridge tab. */
+const RELAYABLE = new Set(["hello", "heartbeat", "bye"]);
+export const RELAY_MAX_HOPS = 4;
+
+const isBeat = (v: unknown) => v === undefined || (typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
+
+function isValidRelay(r: unknown): boolean {
+  if (!isObj(r)) return false;
+  return (
+    isId(r.by) &&
+    typeof r.hops === "number" &&
+    Number.isInteger(r.hops) &&
+    r.hops >= 1 &&
+    r.hops <= RELAY_MAX_HOPS &&
+    isBool(r.far) &&
+    (r.lost === undefined || isBool(r.lost))
+  );
+}
 
 export function isValidMessage(m: unknown): m is SyncMessage {
   if (!isObj(m)) return false;
   if (m.v !== PROTOCOL_VERSION || !isId(m.from) || !isStr(m.nonce, 64) || !TYPES.has(m.t as string)) return false;
   if (m.to !== undefined && !isId(m.to)) return false;
+  if (m.relay !== undefined && (!RELAYABLE.has(m.t as string) || m.to !== undefined || !isValidRelay(m.relay))) return false;
   switch (m.t) {
     case "hello":
-      return isStr(m.label, 8) && isValidVc(m.vc) && isStr(m.stateHash, 64) && isBool(m.wantReply) && isBool(m.rtc) && isBool(m.visible);
+      return isStr(m.label, 8) && isValidVc(m.vc) && isStr(m.stateHash, 64) && isBool(m.wantReply) && isBool(m.rtc) && isBool(m.visible) && isBeat(m.beat);
     case "heartbeat":
-      return isStr(m.label, 8) && isValidVc(m.vc) && isStr(m.stateHash, 64) && isBool(m.rtc) && isBool(m.visible);
+      return (
+        isStr(m.label, 8) &&
+        isValidVc(m.vc) &&
+        isStr(m.stateHash, 64) &&
+        isBool(m.rtc) &&
+        isBool(m.visible) &&
+        isBeat(m.beat) &&
+        (m.offline === undefined || isBool(m.offline))
+      );
     case "ops":
+      // Elements are checked one by one (isValidOp) before anything reads them.
       return Array.isArray(m.ops) && m.ops.length <= 10_000 && (m.reason === "live" || m.reason === "catchup");
     case "sync-req":
       return isValidVc(m.vc);
     case "presence":
       return isNum(m.seq) && m.seq >= 0 && sanitizePresence(m.state) !== null;
     case "bye":
-      return true;
+      return isBeat(m.beat);
   }
   return false;
 }
