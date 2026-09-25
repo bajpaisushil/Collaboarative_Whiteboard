@@ -1,9 +1,9 @@
 # Weave — architecture & contracts
 
 Weave is an **offline-first collaborative whiteboard that explains its own merges**.
-Every browser tab is an independent replica (a "user"). Tabs talk over
-`BroadcastChannel`. There is **no server
-and no database**: the only source of truth is each replica's operation log, persisted
+Every browser tab is an independent replica (a "user"). Tabs on one computer talk over
+`BroadcastChannel`; different computers pair directly over WebRTC with copy-paste codes. There
+is **no server and no database**: the only source of truth is each replica's operation log, persisted
 to the tab's own `sessionStorage` so a reload keeps the tab's identity and history.
 
 The hero feature: select any conflict and Weave shows *exactly why* two concurrent
@@ -22,7 +22,7 @@ If code and this doc disagree, fix one of them — never leave them diverged.
 
 ```
 src/lib/crdt/      pure, framework-free CRDT engine (no DOM, no timers, deterministic)
-src/lib/sync/      transports, network simulator, anti-entropy sync engine, presence
+src/lib/sync/      protocol, BroadcastChannel + WebRTC transports, router, network simulator
 src/lib/session/   WhiteboardSession: glues replica + sync + persistence; React store
 src/components/    React UI (client components only)
 src/app/           Next.js App Router routes: `/` (board), `/split` (two replicas side by side)
@@ -312,9 +312,23 @@ reconnect choreography in both tabs.
 **Network chaos** (simulator): latency, jitter, drop rate, duplicate rate — to show the
 causal buffer and anti-entropy converge anyway.
 
-**Transport**: BroadcastChannel (same-origin tabs, and the two in-process panes of
-`/split`). The protocol reserves `rtc-signal` for a WebRTC DataChannel upgrade, but it is not
-enabled in this build.
+**Transports**: BroadcastChannel reaches the tabs on this computer (and the two in-process
+panes of `/split`). **WebRTC DataChannels** reach other computers, paired without any server:
+the inviter's offer and the invitee's answer travel as copy-paste codes (`W1.z.<base64url>` =
+deflate-compressed session description with every ICE candidate — no trickle, so each side
+hands over exactly one code; invite links carry it in the URL *fragment* so it never reaches
+a server). A public STUN server only helps the two computers discover their addresses; no
+board data passes through it (strict NATs may need a TURN server via `?ice=`). A `LinkRouter`
+sends every message on every open path; all message types are idempotent, so a peer reachable
+both ways is harmless, and replicas behind a link that aren't directly paired (the other
+computer's other tabs) converge transitively through anti-entropy. The cable switch and
+network chaos wrap the router, so "offline" cuts every path. Large messages are chunked and
+reassembled; sends apply backpressure. If a link dies, edits keep working offline and merge
+after re-pairing.
+
+**Offline loading**: a service worker (production only, https/localhost) serves `/` and
+`/split` network-first with a cached fallback, and `/_next/static` cache-first, so after one
+online visit the app itself loads with no network.
 
 **Identity**: before a session becomes `ready`, it takes a Web Locks lease
 `weave:rid:<replicaId>` for its lifetime. "Duplicate tab" / `window.open` clones copy
